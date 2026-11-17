@@ -22,17 +22,21 @@ The snapshot writes loose objects (blobs and trees) into the repo's own
 
 from __future__ import annotations
 
+import atexit
 import contextlib
 import math
 import os
+import re
 import shutil
 import signal
+import stat
 import subprocess
 import tempfile
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from .contract import MAX_DIFF_CHARS
 from .forbidden import exclude_pathspecs, is_forbidden_path
@@ -96,6 +100,56 @@ class Deadline:
 
 
 @dataclass(frozen=True)
+class Area:
+    """Where a diff may look: the project's own directory, never a home repo.
+
+    A project can sit inside a bigger repo (a monorepo, or a dotfiles repo
+    holding the person's whole home): only the project's subtree is
+    snapshotted and diffed, and a repo whose top is the home directory, or
+    above it, gets no diff at all.
+    """
+
+    project_dir: Path
+    home: Path
+
+
+# Process groups of the git calls running now, killed if the hook is stopped
+# (SIGTERM from the agent at its timeout) or exits with one still going.
+_LIVE: set[int] = set()
+_PREVIOUS_TERM: Any = signal.SIG_DFL
+_CLEANUP_INSTALLED: list[bool] = []
+
+
+def _kill_live() -> None:
+    """Kill every git process group still running."""
+    for pgid in list(_LIVE):
+        with contextlib.suppress(OSError):
+            os.killpg(pgid, signal.SIGKILL)
+        _LIVE.discard(pgid)
+
+
+def _on_term(signum: int, frame: object) -> None:
+    """SIGTERM: kill the running git first, then do what SIGTERM did before."""
+    _kill_live()
+    if callable(_PREVIOUS_TERM):
+        _PREVIOUS_TERM(signum, frame)
+        return
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    os.kill(os.getpid(), signal.SIGTERM)
+
+
+def install_cleanup() -> None:
+    """Make sure no git outlives the hook (call once, from the main thread)."""
+    global _PREVIOUS_TERM
+    if _CLEANUP_INSTALLED:
+        return
+    _CLEANUP_INSTALLED.append(True)
+    atexit.register(_kill_live)
+    _PREVIOUS_TERM = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGTERM, _on_term)
+
+
+@dataclass(frozen=True)
 class GitOutput:
     """What a git command printed, and whether the size cap cut it short."""
 
@@ -147,6 +201,7 @@ def run_git(
         )
     except OSError:  # git missing, cwd gone
         return None
+    _LIVE.add(proc.pid)
     chunks: list[bytes] = []
     stdout = proc.stdout
     assert stdout is not None  # noqa: S101 - PIPE always sets it
@@ -166,6 +221,7 @@ def run_git(
         return None
     finally:
         stdout.close()
+        _LIVE.discard(proc.pid)
     if not chunks or (code != 0 and not truncated):
         return None
     return GitOutput(chunks[0][:limit].decode("utf-8", errors="replace"), truncated)
@@ -191,16 +247,19 @@ _GIT_DIR_WALK_S = 0.3
 
 
 def _no_symlinks(git_dir: Path, deadline: Deadline) -> bool:
-    """True if nothing anywhere in ``git_dir`` is a symlink (an lstat walk
-    that never follows one), within 100,000 entries and 0.3 s of the hook's
-    budget; False when it can't tell (too big, too slow, unreadable).
+    """True if everything in ``git_dir`` is a plain file or directory: no
+    symlink, FIFO, socket or device (an lstat walk that never follows a
+    link), within 100,000 entries and 0.3 s of the hook's budget; False when
+    it can't tell (too big, too slow, unreadable).
 
     Why one walk and not a list of entries: refs, objects (and each fan-out
     directory or pack), the index, info/grafts, shallow... any of them can
     be a symlink into another of the person's repos, and git would serve
-    that repo's history as this one's. Hardlinked files are out of scope:
-    objects are content-addressed, so a hardlink can only supply an object
-    the attacker already knows the contents of.
+    that repo's history as this one's; a FIFO would hang whoever reads it.
+    ``hooks/`` is skipped: hooks are often symlinked into the project, and
+    git never runs them here (``core.hooksPath`` is forced to /dev/null).
+    Hardlinked files are out of scope: objects are content-addressed, so a
+    hardlink can only supply an object the attacker already knows.
     """
     stop = min(time.monotonic() + _GIT_DIR_WALK_S, deadline.end)
     seen = 0
@@ -209,32 +268,61 @@ def _no_symlinks(git_dir: Path, deadline: Deadline) -> bool:
             return False
         pending = [str(git_dir)]
         while pending:
-            with os.scandir(pending.pop()) as entries:
+            top = pending.pop()
+            with os.scandir(top) as entries:
                 for entry in entries:
+                    if top == str(git_dir) and entry.name == "hooks":
+                        continue
                     seen += 1
                     if seen > _MAX_GIT_DIR_ENTRIES or time.monotonic() > stop:
                         return False
-                    if entry.is_symlink():
-                        return False
                     if entry.is_dir(follow_symlinks=False):
                         pending.append(entry.path)
+                    elif entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+                        return False
     except OSError:
         return False
     return True
 
 
+_CONTROL_BYTES = 4096  # gitdir, commondir, alternates: a path or a few
+
+
+def _read_control(path: Path) -> tuple[bool, str]:
+    """A small git control file the plugin reads itself: (ok, text).
+
+    Missing is fine (``(True, "")``). Anything but a regular file of at most
+    4 KB of UTF-8 (a FIFO, a symlink, a directory, a huge file) is
+    ``(False, "")``: the caller then refuses, so nothing can make the hook
+    block on a read.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return True, ""
+    except OSError:
+        return False, ""
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return False, ""
+        data = os.read(fd, _CONTROL_BYTES + 1)
+    finally:
+        os.close(fd)
+    if len(data) > _CONTROL_BYTES:
+        return False, ""
+    try:
+        return True, data.decode("utf-8")
+    except UnicodeDecodeError:
+        return False, ""
+
+
 def _borrows(git_dir: Path) -> bool:
     """True if a git dir takes refs or objects from elsewhere: a ``commondir``
-    file, or a non-empty ``objects/info/alternates``."""
-    if (git_dir / "commondir").exists():
+    file, or a non-empty (or unreadable) ``objects/info/alternates``."""
+    if os.path.lexists(git_dir / "commondir"):
         return True
-    try:
-        alternates = (git_dir / "objects" / "info" / "alternates").read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return False
-    except (OSError, UnicodeDecodeError):
-        return True
-    return bool(alternates.strip())
+    ok, alternates = _read_control(git_dir / "objects" / "info" / "alternates")
+    return not ok or bool(alternates.strip())
 
 
 def _own_git_dir(root: Path, git_dir: Path, common_dir: Path, deadline: Deadline) -> bool:
@@ -251,19 +339,19 @@ def _own_git_dir(root: Path, git_dir: Path, common_dir: Path, deadline: Deadline
     if (root / ".git").is_symlink():
         return False
     if _same(git_dir, root / ".git"):
+        # The walk comes first: it refuses a FIFO before anything reads it.
         return (
-            _same(common_dir, git_dir) and not _borrows(git_dir) and _no_symlinks(git_dir, deadline)
+            _no_symlinks(git_dir, deadline) and _same(common_dir, git_dir) and not _borrows(git_dir)
         )
     worktrees = common_dir / "worktrees"
-    if not _same(git_dir.parent, worktrees) or _borrows(common_dir):
+    if not _same(git_dir.parent, worktrees):
         return False
     if not (_no_symlinks(git_dir, deadline) and _no_symlinks(common_dir, deadline)):
         return False
-    try:
-        listed = (git_dir / "gitdir").read_text(encoding="utf-8").strip()
-    except (OSError, UnicodeDecodeError):
+    ok, listed = _read_control(git_dir / "gitdir")
+    if not ok or not listed.strip() or _borrows(common_dir):
         return False
-    return _same(Path(listed), root / ".git")
+    return _same(Path(listed.strip()), root / ".git")
 
 
 def repo_root(cwd: Path, deadline: Deadline | None = None) -> Path | None:
@@ -306,11 +394,47 @@ def _repo_defines_filters(root: Path, timeout: float = GIT_TIMEOUT_S) -> bool:
     return False
 
 
-def _scope() -> list[str]:
-    return ["--", ".", *exclude_pathspecs()]
+_GLOB_SPECIAL = re.compile(r"([*?\[\]\\])")
 
 
-def snapshot(cwd: Path, data_dir: Path, deadline: Deadline) -> str | None:
+def _scope(prefix: str = "") -> list[str]:
+    """Pathspecs: the project's subtree (or the whole tree), credential files out.
+
+    The excludes start under the subtree too: with a subtree include and
+    top-level ``**/`` excludes, ``git add -A`` (2.50) skips untracked files.
+    """
+    if not prefix:
+        return ["--", ".", *exclude_pathspecs()]
+    escaped = _GLOB_SPECIAL.sub(r"\\\1", prefix)
+    return ["--", f":(top,literal){prefix}", *exclude_pathspecs(escaped)]
+
+
+def _target(cwd: Path, deadline: Deadline, area: Area | None) -> tuple[Path, list[str]] | None:
+    """The repo's top and the pathspecs for this project; None if no diff may be taken.
+
+    No diff when the repo's top is the home directory or above it (a
+    dotfiles repo), or when the project isn't in this repo at all.
+    """
+    root = repo_root(cwd, deadline)
+    if root is None:
+        return None
+    if area is None:
+        return root, _scope()
+    try:
+        top, home = root.resolve(strict=True), area.home.resolve()
+        project = area.project_dir.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    if top == home or top in home.parents:
+        return None
+    if project == top or project in top.parents:
+        return root, _scope()
+    if top in project.parents:
+        return root, _scope(project.relative_to(top).as_posix())
+    return None
+
+
+def snapshot(cwd: Path, data_dir: Path, deadline: Deadline, area: Area | None = None) -> str | None:
     """Record the work tree (minus credential files) as a tree; its sha, or None.
 
     The real index is only copied, never written. The private index is a
@@ -319,8 +443,11 @@ def snapshot(cwd: Path, data_dir: Path, deadline: Deadline) -> str | None:
     """
     index_file: Path | None = None
     try:
-        root = repo_root(cwd, deadline)
-        if root is None or _repo_defines_filters(root, deadline.left(GIT_TIMEOUT_S)):
+        target = _target(cwd, deadline, area)
+        if target is None:
+            return None
+        root, scope = target
+        if _repo_defines_filters(root, deadline.left(GIT_TIMEOUT_S)):
             return None
         real = run_git(
             ["rev-parse", "--git-path", "index"], root, timeout=deadline.left(GIT_TIMEOUT_S)
@@ -339,7 +466,7 @@ def snapshot(cwd: Path, data_dir: Path, deadline: Deadline) -> str | None:
         else:
             index_file.unlink()  # git wants no index file rather than an empty one
         added = run_git(
-            ["add", "-A", *_scope()],
+            ["add", "-A", *scope],
             root,
             timeout=deadline.left(GIT_TIMEOUT_S),
             index_file=index_file,
@@ -366,9 +493,9 @@ def cap_diff(text: str, truncated: bool = False) -> str:
     return text[: MAX_DIFF_CHARS - len(TRUNCATED)] + TRUNCATED
 
 
-def _diff(args: list[str], root: Path, deadline: Deadline) -> str | None:
+def _diff(args: list[str], root: Path, deadline: Deadline, scope: list[str]) -> str | None:
     out = run_git(
-        [*_DIFF_FLAGS, *args, *_scope()],
+        [*_DIFF_FLAGS, *args, *scope],
         root,
         timeout=deadline.left(GIT_TIMEOUT_S),
         limit=_DIFF_BYTES,
@@ -376,31 +503,39 @@ def _diff(args: list[str], root: Path, deadline: Deadline) -> str | None:
     return None if out is None else cap_diff(out.text, out.truncated)
 
 
-def diff_trees(cwd: Path, before: str, after: str, deadline: Deadline) -> str | None:
+def diff_trees(
+    cwd: Path, before: str, after: str, deadline: Deadline, area: Area | None = None
+) -> str | None:
     """The diff between two snapshots, credential files excluded."""
-    root = repo_root(cwd, deadline)
-    return None if root is None else _diff([before, after], root, deadline)
+    target = _target(cwd, deadline, area)
+    return None if target is None else _diff([before, after], target[0], deadline, target[1])
 
 
-def collect_diff(cwd: Path, deadline: Deadline | None = None) -> str | None:
+def collect_diff(
+    cwd: Path, deadline: Deadline | None = None, area: Area | None = None
+) -> str | None:
     """The fallback diff when there is no snapshot from the start of the turn.
 
     ``git diff HEAD``; in a repo with no commits yet, the staged diff with a
     list of untracked files (credential files left out) in front of it.
-    None when ``cwd`` isn't in a repo or git is missing.
+    None when ``cwd`` isn't in a repo or git is missing. Only the project's
+    subtree (see ``Area``).
     """
     deadline = deadline or Deadline(_NO_DEADLINE_S)
-    root = repo_root(cwd, deadline)
-    if root is None or _repo_defines_filters(root, deadline.left(GIT_TIMEOUT_S)):
+    target = _target(cwd, deadline, area)
+    if target is None:
+        return None
+    root, scope = target
+    if _repo_defines_filters(root, deadline.left(GIT_TIMEOUT_S)):
         return None
     head = run_git(
         ["rev-parse", "--verify", "-q", "HEAD"], root, timeout=deadline.left(GIT_TIMEOUT_S)
     )
     if head is not None:
-        return _diff(["HEAD"], root, deadline)
-    staged = _diff(["--cached"], root, deadline)
+        return _diff(["HEAD"], root, deadline, scope)
+    staged = _diff(["--cached"], root, deadline, scope)
     listed = run_git(
-        ["ls-files", "--others", "--exclude-standard", "-z"],
+        ["ls-files", "--others", "--exclude-standard", "-z", *scope],
         root,
         timeout=deadline.left(GIT_TIMEOUT_S),
     )

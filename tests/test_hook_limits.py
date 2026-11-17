@@ -249,7 +249,7 @@ def test_after_never_returns_a_block(
     server: StubServer, env: dict[str, str], project: Path
 ) -> None:
     server.reply = BLOCK
-    event = core.TurnEnded("sess-1", "prompt-1", project, "done", continuing=False)
+    event = core.TurnEnded("sess-1", "prompt-1", project, project, "done", continuing=False)
     config = claude_code.config_from_env(env)
 
     reply = core.after(event, config, PROFILE)

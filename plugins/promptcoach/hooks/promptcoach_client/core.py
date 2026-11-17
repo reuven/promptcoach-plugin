@@ -67,6 +67,7 @@ AFTER_BUDGET_S = 13.5
 AFTER_HTTP_TIMEOUT_S = 12.0
 JOIN_GRACE_S = 0.2  # for a git call stopped at the deadline to be killed
 MAX_COMMAND_PROMPT_CHARS = 1_000  # a coach command is short
+REDACT_WINDOW_CHARS = 64_000  # output redacted before its tail is kept
 MAX_REPLY_BYTES = 256_000
 STALE_AFTER_S = 24 * 3600
 LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1"})
@@ -154,6 +155,7 @@ class TurnEnded:
     session_id: str
     prompt_id: str
     cwd: Path
+    project_dir: Path
     reply: str | None  # the agent's final message, if the agent tells us
     continuing: bool  # a hook already made the agent go on: stay out of it
 
@@ -502,7 +504,7 @@ def before(event: PromptSubmitted, config: Config, profile: AgentProfile) -> Rep
 
         def take() -> None:
             try:
-                tree = gitdiff.snapshot(event.cwd, data_dir, deadline)
+                tree = gitdiff.snapshot(event.cwd, data_dir, deadline, _area(event, config))
             except Exception:  # noqa: BLE001 - a thread's error would print to stderr
                 return
             trees.extend([tree] if tree else [])
@@ -548,17 +550,26 @@ def record(event: ToolRan, config: Config) -> None:
         "prompt_id": event.prompt_id,
         "command": event.command[:MAX_COMMAND_CHARS],
         "exit_code": event.exit_code,
-        "output_tail": event.output[-MAX_OUTPUT_CHARS:] if keep_output else "",
+        "output_tail": _tail(event.output) if keep_output else "",
         "is_test": bool(IS_TEST.search(event.command)),
     }
     Store(config.data_dir).append_run(event.session_id, run)
+
+
+def _tail(output: str) -> str:
+    """The redacted tail of a run's output.
+
+    Redacted before it is cut, so a key the cut would split is caught whole
+    (a key longer than the window is caught by its orphan END line).
+    """
+    return redact(output[-REDACT_WINDOW_CHARS:])[-MAX_OUTPUT_CHARS:]
 
 
 def _output_tail(command: str, output: object, prompt_only: bool) -> str:
     """What may be sent of a run's output: its redacted tail, or nothing."""
     if prompt_only or not isinstance(output, str) or prints_secrets(command):
         return ""
-    return redact(output[-MAX_OUTPUT_CHARS:])[-MAX_OUTPUT_CHARS:]
+    return _tail(output)
 
 
 def _tool_runs(
@@ -574,7 +585,7 @@ def _tool_runs(
             {
                 "command": command_skeleton(command)
                 if prompt_only
-                else command[:MAX_COMMAND_CHARS],
+                else redact(command)[:MAX_COMMAND_CHARS],
                 "exit_code": code if isinstance(code, int) and not isinstance(code, bool) else None,
                 "output_tail": _output_tail(command, output, prompt_only),
                 "is_test": bool(IS_TEST.search(command)),
@@ -583,17 +594,23 @@ def _tool_runs(
     return out[-MAX_TOOL_RUNS:]
 
 
+def _area(event: PromptSubmitted | TurnEnded, config: Config) -> gitdiff.Area:
+    """Where this turn's diff may look: the project, never a home-directory repo."""
+    return gitdiff.Area(event.project_dir, config.home)
+
+
 def _turn_diff(
     event: TurnEnded, config: Config, start_tree: str | None, deadline: gitdiff.Deadline
 ) -> str | None:
     """This turn's diff (snapshot to snapshot, else ``git diff HEAD``), redacted."""
     end_tree = None
+    area = _area(event, config)
     if start_tree and config.data_dir is not None:
-        end_tree = gitdiff.snapshot(event.cwd, config.data_dir, deadline)
+        end_tree = gitdiff.snapshot(event.cwd, config.data_dir, deadline, area)
     if start_tree and end_tree:
-        diff = gitdiff.diff_trees(event.cwd, start_tree, end_tree, deadline)
+        diff = gitdiff.diff_trees(event.cwd, start_tree, end_tree, deadline, area)
     else:
-        diff = gitdiff.collect_diff(event.cwd, deadline)
+        diff = gitdiff.collect_diff(event.cwd, deadline, area)
     return None if diff is None else gitdiff.cap_diff(redact(diff))
 
 

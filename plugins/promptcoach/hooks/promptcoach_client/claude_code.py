@@ -15,7 +15,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, TextIO
 
-from . import __version__, core
+from . import __version__, core, gitdiff
 from .setup_scan import SetupSources
 
 MAX_STDIN_CHARS = 20_000_000
@@ -119,13 +119,15 @@ def tool_ran(payload: Mapping[str, Any]) -> core.ToolRan | None:
     )
 
 
-def turn_ended(payload: Mapping[str, Any]) -> core.TurnEnded:
+def turn_ended(payload: Mapping[str, Any], env: Mapping[str, str]) -> core.TurnEnded:
     """A ``Stop`` payload as the neutral event."""
     reply = payload.get("last_assistant_message")
+    cwd = Path(_text(payload, "cwd"))
     return core.TurnEnded(
         session_id=_text(payload, "session_id"),
         prompt_id=_text(payload, "prompt_id"),
-        cwd=Path(_text(payload, "cwd")),
+        cwd=cwd,
+        project_dir=Path(env.get("CLAUDE_PROJECT_DIR") or cwd),
         reply=reply if isinstance(reply, str) else None,
         continuing=payload.get("stop_hook_active") is True,
     )
@@ -164,6 +166,7 @@ def main(argv: list[str], stdin: TextIO, stdout: TextIO, env: Mapping[str, str])
         if not isinstance(payload, dict):
             return 0
         config = config_from_env(env)
+        gitdiff.install_cleanup()
         if mode == "before":
             emit(
                 core.before(prompt_submitted(payload, env), config, PROFILE),
@@ -175,7 +178,7 @@ def main(argv: list[str], stdin: TextIO, stdout: TextIO, env: Mapping[str, str])
             if run is not None:
                 core.record(run, config)
         elif mode == "after":
-            emit(core.after(turn_ended(payload), config, PROFILE), stdout, allow_block=False)
+            emit(core.after(turn_ended(payload, env), config, PROFILE), stdout, allow_block=False)
     except Exception:  # noqa: BLE001, S110 - a coach must never break the session
         pass
     return 0

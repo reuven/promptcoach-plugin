@@ -65,8 +65,9 @@ def is_forbidden_path(path: str) -> bool:
     return ("/" + normalized).endswith(FORBIDDEN_PATH_ENDINGS)
 
 
-def exclude_pathspecs() -> list[str]:
-    """Git pathspecs that leave out every forbidden path, anywhere in the tree.
+def exclude_pathspecs(under: str = "") -> list[str]:
+    """Git pathspecs that leave out every forbidden path, anywhere in the tree
+    (or anywhere under ``under``, a glob-escaped directory from the top).
 
     Pathspecs can't say "except templates", so ``.env.*`` and ``id_rsa*`` are
     excluded whole (``.env.example`` and ``id_rsa.pub`` too): leaving out a
@@ -79,4 +80,5 @@ def exclude_pathspecs() -> list[str]:
         "**/.env.*",
         *(f"**/{name}*" for name in SSH_KEY_NAMES),
     ]
-    return [f":(exclude,glob,icase){pattern}" for pattern in patterns]
+    base = f"{under}/" if under else ""
+    return [f":(exclude,glob,icase){base}{pattern}" for pattern in patterns]

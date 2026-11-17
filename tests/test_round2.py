@@ -5,6 +5,7 @@ a key, the hooks/ directory, and killing git when the hook is stopped.
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import signal
@@ -412,6 +413,34 @@ def test_monorepo_subdir_diffs_its_own_subtree(
     assert "outside the project" not in json.dumps(diffs)
 
 
+def test_scope_escapes_glob_characters_in_the_project_path() -> None:
+    scope = gitdiff._scope("w[e]ird*/d?\\x")
+    assert scope[1] == ":(top,literal)w[e]ird*/d?\\x"
+    assert scope[2] == ":(exclude,glob,icase)w\\[e\\]ird\\*/d\\?\\\\x/**/.env"
+    assert gitdiff._scope()[1:3] == [".", ":(exclude,glob,icase)**/.env"]
+
+
+def test_secrets_in_a_monorepo_subdir_stay_out(
+    server: StubServer, env: dict[str, str], repo: Path, data_dir: Path
+) -> None:
+    sub = repo / "services" / "api"
+    (sub / "deep").mkdir(parents=True)
+    (sub / "main.py").write_text("v = 1\n")
+    _commit_all(repo)
+    env = {**env, "CLAUDE_PROJECT_DIR": str(sub)}
+    _not_prompt_only(data_dir)
+
+    run_hook("before", prompt_payload(sub), env)
+    (sub / ".ENV").write_text("LEAKED_VALUE_1\n")
+    (sub / "deep" / "server.pem").write_text("LEAKED_VALUE_2\n")
+    (sub / "new.py").write_text("n = 1\n")
+    run_hook("after", stop_payload(sub), env)
+
+    sent = json.dumps(_diffs(server))
+    assert "+n = 1" in sent
+    assert "LEAKED_VALUE" not in sent
+
+
 def test_project_outside_the_repo_gets_no_diff(
     server: StubServer, env: dict[str, str], repo: Path, data_dir: Path, tmp_path: Path
 ) -> None:
@@ -530,3 +559,57 @@ def test_sigterm_kills_the_running_git(tmp_path: Path) -> None:
 
     with pytest.raises(ProcessLookupError):
         os.kill(git_pid, 0)
+
+
+def test_on_term_hands_over_to_the_previous_handler(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[int] = []
+    monkeypatch.setattr(gitdiff, "_PREVIOUS_TERM", lambda signum, frame: seen.append(signum))
+    gitdiff._on_term(signal.SIGTERM, None)
+    assert seen == [signal.SIGTERM]
+
+
+def test_on_term_without_a_handler_dies_by_sigterm(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[object] = []
+    monkeypatch.setattr(gitdiff, "_PREVIOUS_TERM", signal.SIG_DFL)
+    monkeypatch.setattr(signal, "signal", lambda *a: calls.append(("signal", *a)))
+    monkeypatch.setattr(os, "kill", lambda *a: calls.append(("kill", *a)))
+    gitdiff._on_term(signal.SIGTERM, None)
+    assert calls == [
+        ("signal", signal.SIGTERM, signal.SIG_DFL),
+        ("kill", os.getpid(), signal.SIGTERM),
+    ]
+
+
+def test_install_cleanup_runs_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    installed: list[object] = []
+    monkeypatch.setattr(gitdiff, "_CLEANUP_INSTALLED", [])
+    monkeypatch.setattr(atexit, "register", installed.append)
+    monkeypatch.setattr(signal, "signal", lambda *a: installed.append(a))
+    gitdiff.install_cleanup()
+    gitdiff.install_cleanup()
+    assert installed == [gitdiff._kill_live, (signal.SIGTERM, gitdiff._on_term)]
+
+
+def test_read_control_rejects_bytes_that_are_not_utf8(tmp_path: Path) -> None:
+    (tmp_path / "bad").write_bytes(b"\xff\xfe")
+    assert gitdiff._read_control(tmp_path / "bad") == (False, "")
+
+
+def test_missing_project_dir_gets_no_diff(repo: Path, tmp_path: Path) -> None:
+    (repo / "app.py").write_text("print('v2')\n")
+    area = gitdiff.Area(tmp_path / "gone", tmp_path / "home")
+    assert gitdiff.collect_diff(repo, area=area) is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "password:",
+        "password:\nhost: x",
+        "secrets:\n  db_password: x9y8z7w6q",
+        "token:\n\nnext: 1",
+    ],
+)
+def test_yaml_next_line_left_alone(text: str) -> None:
+    assert redact(text).split("\n")[0] == text.split("\n")[0]
+    assert redact(text).count("[REDACTED]") == text.count("x9y8z7w6q")

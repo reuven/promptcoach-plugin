@@ -38,7 +38,9 @@ def _not_prompt_only(data_dir: Path) -> None:
 
 
 def _turn(repo: Path, env: dict[str, str], change: Path, text: str) -> None:
-    """A prompt, an edit, a matching Stop, and an unmatched Stop (the fallback)."""
+    """A prompt, an edit, a matching Stop, and an unmatched Stop (the fallback),
+    in a session started in ``repo``."""
+    env = {**env, "CLAUDE_PROJECT_DIR": str(repo)}
     run_hook("before", prompt_payload(repo), env)
     change.write_text(text)
     assert run_hook("after", stop_payload(repo), env) == ""
