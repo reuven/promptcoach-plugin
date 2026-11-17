@@ -52,7 +52,7 @@ def test_main_guard(monkeypatch: pytest.MonkeyPatch, env: dict[str, str], projec
 
 
 def test_old_python_warns_once_per_session(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(sys, "version_info", (3, 9, 6, "final", 0))
+    monkeypatch.setattr(sys, "version_info", (3, 8, 10, "final", 0))
     env = {"CLAUDE_PLUGIN_DATA": str(tmp_path / "data")}
 
     def run(mode: str, session: str) -> str:
@@ -63,7 +63,7 @@ def test_old_python_warns_once_per_session(monkeypatch: pytest.MonkeyPatch, tmp_
 
     first = run("before", "s1")
     assert (
-        "needs Python 3.10 or newer, and python3 here is 3.9" in json.loads(first)["systemMessage"]
+        "needs Python 3.9 or newer, and python3 here is 3.8" in json.loads(first)["systemMessage"]
     )
     assert run("before", "s1") == ""
     assert run("after", "s2") == ""
@@ -73,7 +73,7 @@ def test_old_python_warns_once_per_session(monkeypatch: pytest.MonkeyPatch, tmp_
 def test_old_python_never_breaks_the_session(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(sys, "version_info", (3, 8, 0, "final", 0))
+    monkeypatch.setattr(sys, "version_info", (3, 7, 0, "final", 0))
     out = io.StringIO()
 
     assert (

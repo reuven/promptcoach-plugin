@@ -5,6 +5,7 @@
   "description": "Coaching on your prompts and on what the agent did, shown to you, never to Claude",
   "author": {"name": "Reuven Lerner"},
   "homepage": "https://coach.lernerpython.com",
+  "license": "MIT",
   "userConfig": {
     "token": {
       "type": "string",

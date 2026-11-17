@@ -12,9 +12,9 @@ import os
 import sys
 from typing import Mapping, TextIO  # noqa: UP035 - must import on old Pythons
 
-MIN_PYTHON = (3, 10)
+MIN_PYTHON = (3, 9)
 OLD_PYTHON_MESSAGE = (
-    "Prompt coach needs Python 3.10 or newer, and python3 here is {}.{}. "
+    "Prompt coach needs Python 3.9 or newer, and python3 here is {}.{}. "
     "Install a newer Python (python.org, Homebrew or uv) to get coaching."
 )
 

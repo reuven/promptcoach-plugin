@@ -3,7 +3,8 @@ name = "promptcoach-plugin"
 version = "0.1.0"
 description = "Claude Code plugin for the LernerPython prompt coach (hook code is stdlib only)"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.9"
+license = "MIT"
 dependencies = []
 
 [tool.uv]
@@ -11,9 +12,11 @@ package = false
 
 [dependency-groups]
 dev = [
-    "mypy>=2.4.1",
-    "pytest>=9.2.0",
-    "pytest-cov>=7.1.0",
+    "mypy>=1.18,<2",
+    # pytest 9 needs 3.10; the 3.9 run uses the last pytest 8.
+    "pytest>=9.2.0; python_version >= '3.10'",
+    "pytest>=8.4,<9; python_version < '3.10'",
+    "pytest-cov>=7.0.0",
     "ruff>=0.17.5",
 ]
 
@@ -24,14 +27,17 @@ testpaths = ["tests"]
 filterwarnings = ["error"]
 
 [tool.mypy]
-files = ["plugins/promptcoach/hooks", "tests"]
+# The hook code is checked as Python 3.9, its oldest supported version. The
+# tests import pytest, which needs 3.10+, so CI checks them in a second run:
+# `uv run mypy --python-version 3.10 tests`.
+files = ["plugins/promptcoach/hooks"]
 mypy_path = ["plugins/promptcoach/hooks", "tests"]
 explicit_package_bases = true
-python_version = "3.10"
+python_version = "3.9"
 strict = true
 
 [tool.ruff]
-target-version = "py310"
+target-version = "py39"
 line-length = 100
 extend-exclude = ["*.md"]
 
