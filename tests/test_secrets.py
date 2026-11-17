@@ -120,10 +120,10 @@ def test_token_shapes_are_redacted(secret: str) -> None:
     [
         ("DB_PASSWORD=hunter2", "DB_PASSWORD=", "hunter2"),
         ("export GITHUB_TOKEN=abc123", "export GITHUB_TOKEN=", "abc123"),
-        ("client_secret: s3cr3t value", "client_secret:", "s3cr3t"),
+        ("client_secret: s3cr3t-value", "client_secret:", "s3cr3t"),
         ('"api_key": "abc123",', '"api_key":', "abc123"),
         ("OPENAI_API_KEY = 'abc123'", "OPENAI_API_KEY =", "abc123"),
-        ("Private_Key=xyz", "Private_Key=", "xyz"),
+        ("Private_Key='xyz'", "Private_Key=", "xyz"),
     ],
 )
 def test_secret_named_assignments_are_redacted(line: str, kept: str, value: str) -> None:
