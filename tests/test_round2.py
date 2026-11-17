@@ -254,7 +254,7 @@ def test_yaml_value_on_the_next_line_keeps_the_rest() -> None:
         'api_key = os.getenv("X", None)',
         'key = os.environ["API_KEY"]',
         "secret = client.secrets.get(name)",
-        "token = make_token(user.id, size=32),",
+        "token = make_token(user.id, user.name),",
         "password = get_password()",
         "if password_hash == compute(pw):",
         "token := next_token()",
