@@ -58,7 +58,12 @@ left out of every snapshot and diff on your machine, and the server refuses
 them too. The server also scrubs secrets from everything it stores.
 
 The snapshots are made with a private git index file, so your own index,
-staging area and stash are never touched.
+staging area and stash are never touched. The plugin never runs programs a
+repository's own git config names (an fsmonitor hook, hooks, diff drivers);
+a repository whose own config defines a clean/smudge filter gets no diff at
+all. Files are read only where they are: a `CLAUDE.md` or `.claude/` that is
+a symlink out of the project (or out of your home directory, for the global
+files), or to a credential file, is treated as absent.
 
 ## Prompt-only mode
 
@@ -69,8 +74,10 @@ Prompt-only mode) or on your settings page at
 prompt-only mode:
 
 - no diffs, no command output and no Claude reply are sent;
-- commands are reduced to their program and plain options (`python -c '...'`
-  is sent as `python -c`);
+- commands are reduced to an outline: the program, its known subcommands,
+  option names without their values, and file paths
+  (`uv run pytest tests/x.py -k slow` is sent as `uv run pytest tests/x.py -k`,
+  `python -c '...'` as `python -c`, `mysql -p secret` as `mysql`);
 - your prompts, your instructions files and the setup facts above are still
   sent.
 

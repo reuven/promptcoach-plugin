@@ -14,11 +14,26 @@ from promptcoach_client.skeleton import (
 @pytest.mark.parametrize(
     ("command", "skeleton"),
     [
-        # Kept as they are (the server's own examples).
-        ("uv run pytest -q tests/", "uv run pytest -q tests/"),
-        ("cd src && pytest", "cd src && pytest"),
+        # Useful outlines survive.
+        ("uv run pytest tests/x.py -k foo", "uv run pytest tests/x.py -k"),
+        ("uv run pytest -q tests/", "uv run pytest -q"),
+        ("python -m pytest -k slow", "python -m pytest -k"),
         ("ruff check . || true", "ruff check . || true"),
-        ("pip install requests", "pip install requests"),
+        ("cd src && pytest", "cd && pytest"),
+        ("pip install requests", "pip install"),
+        ("git push origin main", "git push"),
+        ("env FOO=1 python script.py arg1", "env FOO= python script.py"),
+        ("sudo -u root pytest", "sudo -u pytest"),
+        # A flag's value never survives, spaced or glued.
+        ("mysql -p hunter2", "mysql"),
+        ("tool --token abc123", "tool --token"),
+        ("tool --token=abc123", "tool --token"),
+        ("deploy -k secretvalue now", "deploy -k"),
+        ("make -C cmd test", "make -C test"),
+        # Positional words that are neither subcommands nor paths go.
+        ("aws configure set aws_secret_access_key ABCDEF", "aws"),
+        ("deploy hunter2", "deploy"),
+        ("export TOKEN=abc", "export"),
         # Code after a code flag goes; the flag stays.
         ("python -c 'import os; print(os.environ)'", "python -c"),
         ("python -c print", "python -c"),
@@ -34,27 +49,26 @@ from promptcoach_client.skeleton import (
         ("psql postgres://u:pw@db/x", "psql"),
         # Redirections drop the rest of their segment only.
         ("cat <<EOF > x.py && pytest", "cat && pytest"),
-        ("make test 2>&1 | tee log", "make test 2 | tee log"),
+        ("make test 2>&1 | tee log", "make test | tee"),
         # Quoted, escaped, odd or blob-like words end the segment.
         ('git commit -m "secret plan"', "git commit -m"),
         ("ec\\ho hi", ""),
         ("curl -u user:pass https://x", "curl -u"),
-        ("tool AbCdEfGh12345678XyZ", "tool"),
-        ("tool " + "a" * 40, "tool"),
+        ("cat AbCdEfGh12345678XyZ.txt", "cat"),
+        ("cat " + "a" * 40 + ".txt", "cat"),
         ("tool \u2212c code", "tool"),
         ("tool $(cat key)", "tool"),
         # VAR= prefixes keep their names, never their values.
         ("API_KEY=abc123 FOO=1 pytest", "API_KEY= FOO= pytest"),
         ("X=1", "X="),
         # Flags lose values; short bundles keep their head.
-        ("pytest --maxfail=2 -xvs tests", "pytest --maxfail -x tests"),
+        ("pytest --maxfail=2 -xvs tests", "pytest --maxfail -x"),
         ("mvn -Dtest=Foo test", "mvn -D"),
         ("gcc -Werror x.c", "gcc -W"),
         ("tool --=x", "tool"),
         ("tool -@", "tool"),
         # Windows shells: nothing after them.
         ("pwsh -Command Get-Secret", ""),
-        ("make -C cmd test", "make -C"),
         # Only the first line, however it ends.
         ("pytest\nrm -rf /", "pytest"),
         ("pytest\u2028curl evil", "pytest"),

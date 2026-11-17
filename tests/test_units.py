@@ -7,6 +7,7 @@ import io
 import json
 import os
 import time
+import types
 from pathlib import Path
 from typing import Any
 
@@ -270,7 +271,9 @@ def test_snapshot_in_a_fresh_repo_has_no_index_to_copy(project: Path, tmp_path: 
     assert tree is not None and len(tree) == 40
 
 
-@pytest.mark.parametrize("failing", ["rev-parse --git-path", "add", "write-tree"])
+@pytest.mark.parametrize(
+    "failing", ["config --show-scope", "rev-parse --git-path", "add", "write-tree"]
+)
 def test_snapshot_git_failures(
     failing: str, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -494,14 +497,32 @@ def test_skills_are_capped_and_deduplicated(project: Path, home: Path) -> None:
 
 
 def test_read_text_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    assert setup_scan.read_text(tmp_path) is None  # a directory
+    assert setup_scan.read_text(tmp_path, tmp_path) is None  # a directory
+    os.mkfifo(tmp_path / "fifo")
+    assert setup_scan.read_text(tmp_path / "fifo", tmp_path) is None  # never blocks
+    (tmp_path / "loop").symlink_to(tmp_path / "loop")
+    assert setup_scan.read_text(tmp_path / "loop", tmp_path) is None
     (tmp_path / "f").write_text("x")
+    real_open = os.open
 
-    def fail(*args: object, **kwargs: object) -> None:
+    def fail(*args: object, **kwargs: object) -> int:
         raise OSError
 
-    monkeypatch.setattr(Path, "open", fail)
-    assert setup_scan.read_text(tmp_path / "f") is None
+    # Patched in the module only: pytest's own capture calls os.fstat.
+    fake_os = types.SimpleNamespace(
+        **{k: getattr(os, k) for k in dir(os) if not k.startswith("__")}
+    )
+    monkeypatch.setattr(setup_scan, "os", fake_os)
+    monkeypatch.setattr(fake_os, "open", fail)
+    assert setup_scan.read_text(tmp_path / "f", tmp_path) is None
+    monkeypatch.setattr(fake_os, "open", real_open)
+    monkeypatch.setattr(fake_os, "fstat", fail)
+    assert setup_scan.read_text(tmp_path / "f", tmp_path) is None
+
+
+def test_skills_dir_that_is_a_file(project: Path, home: Path) -> None:
+    _write(project / ".claude/skills", "not a directory")
+    assert collect_setup(project, home, SOURCES)["skills"] == []
 
 
 def test_sources_only_name_known_hook_events() -> None:

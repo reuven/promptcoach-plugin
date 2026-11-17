@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +29,7 @@ from .contract import (
     MAX_SKILLS,
     PROJECT_SIGNALS,
 )
+from .forbidden import is_forbidden_path
 from .skeleton import prompt_only_skills, prompt_only_test_command
 
 MAX_CONFIG_BYTES = 1_000_000  # pyproject, settings, Makefile: read no more
@@ -84,29 +86,60 @@ class SetupSources:
     skills_dirs: tuple[str, ...]
 
 
-def read_text(path: Path, limit: int = MAX_CONFIG_BYTES) -> str | None:
-    """A regular file's text (at most ``limit`` characters), or None.
+def contained(path: Path, root: Path) -> Path | None:
+    """``path``'s real location, if it stays inside ``root`` and isn't a credential file.
 
-    Never raises: an unreadable, missing or special file is just absent.
+    Why: a project could make ``CLAUDE.md`` (or ``.claude/``) a symlink to
+    ``~/.ssh/id_rsa``; reading through it would send that file. Symlinks
+    are allowed only when they end inside the same tree (project files in
+    the project, global files in the home directory), and never at a
+    forbidden file.
     """
     try:
-        if not path.is_file():
-            return None
-        with path.open(encoding="utf-8", errors="replace") as f:
-            return f.read(limit)
+        real = path.resolve(strict=True)
+        base = root.resolve(strict=True)
+    except (OSError, RuntimeError):  # missing, or a symlink loop
+        return None
+    if real != base and base not in real.parents:
+        return None
+    return None if is_forbidden_path(real.relative_to(base).as_posix()) else real
+
+
+def read_text(path: Path, root: Path, limit: int = MAX_CONFIG_BYTES) -> str | None:
+    """A regular file's text (at most ``limit`` characters), or None.
+
+    Only inside ``root`` (see ``contained``), opened without following a
+    symlink swapped in meanwhile, and only if it is a regular file (never a
+    FIFO or device). Never raises: anything unreadable is just absent.
+    """
+    real = contained(path, root)
+    if real is None:
+        return None
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        fd = os.open(real, flags)
     except OSError:
         return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        return os.read(fd, limit * 4).decode("utf-8", errors="replace")[:limit]
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
 
 
-def _resolve(name: str, project_dir: Path, home: Path) -> Path:
-    return home / name[2:] if name.startswith("~/") else project_dir / name
+def _resolve(name: str, project_dir: Path, home: Path) -> tuple[Path, Path]:
+    """A ``~/``-relative or project-relative file name, with the tree it must stay in."""
+    return (home / name[2:], home) if name.startswith("~/") else (project_dir / name, project_dir)
 
 
 def _instructions(project_dir: Path, home: Path, sources: SetupSources) -> dict[str, str]:
     found: dict[str, str] = {}
     room = MAX_INSTRUCTIONS_TOTAL_CHARS
     for name in (*sources.project_instruction_files, *sources.global_instruction_files):
-        text = read_text(_resolve(name, project_dir, home), MAX_INSTRUCTION_FILE_CHARS)
+        text = read_text(*_resolve(name, project_dir, home), MAX_INSTRUCTION_FILE_CHARS)
         if text is not None and room > 0:
             found[name] = text[:room]
             room -= len(found[name])
@@ -114,7 +147,7 @@ def _instructions(project_dir: Path, home: Path, sources: SetupSources) -> dict[
 
 
 def _ignore_lines(project_dir: Path) -> set[str] | None:
-    text = read_text(project_dir / ".gitignore")
+    text = read_text(project_dir / ".gitignore", project_dir)
     if text is None:
         return None
     return {line.strip() for line in text.splitlines()}
@@ -141,15 +174,15 @@ def _test_command(project_dir: Path, instructions: dict[str, str], pyproject: st
         return "pytest"
     if "[tool.pytest" in pyproject:
         return "uv run pytest" if (project_dir / "uv.lock").is_file() else "pytest"
-    makefile = read_text(project_dir / "Makefile") or ""
+    makefile = read_text(project_dir / "Makefile", project_dir) or ""
     if re.search(r"^test\s*:", makefile, re.MULTILINE):
         return "make test"
     return None
 
 
 def _linters(project_dir: Path, pyproject: str) -> list[str]:
-    setup_cfg = (read_text(project_dir / "setup.cfg") or "") + (
-        read_text(project_dir / "tox.ini") or ""
+    setup_cfg = (read_text(project_dir / "setup.cfg", project_dir) or "") + (
+        read_text(project_dir / "tox.ini", project_dir) or ""
     )
     found = {name for name, section in _PYPROJECT_LINTERS.items() if section in pyproject}
     found |= {
@@ -189,7 +222,7 @@ def _hooks(
     tools: dict[str, set[str]] = {}
     for name in sources.hook_settings_files:
         try:
-            settings: Any = json.loads(read_text(_resolve(name, project_dir, home)) or "{}")
+            settings: Any = json.loads(read_text(*_resolve(name, project_dir, home)) or "{}")
         except ValueError:
             continue
         hooks = settings.get("hooks") if isinstance(settings, dict) else None
@@ -207,10 +240,13 @@ def _hooks(
 def _skills(project_dir: Path, sources: SetupSources) -> list[str]:
     names: list[str] = []
     for rel in sources.skills_dirs:
+        top = contained(project_dir / rel, project_dir)
         try:
-            entries = sorted(p.name for p in (project_dir / rel).iterdir() if p.is_dir())
+            listed = sorted(top.iterdir()) if top else []
         except OSError:
             continue
+        # Each skill must be a directory that stays inside the project too.
+        entries = [p.name for p in listed if (c := contained(p, project_dir)) and c.is_dir()]
         names += [n for n in entries if len(n) <= MAX_SKILL_CHARS and n not in names]
     return names[:MAX_SKILLS]
 
@@ -232,22 +268,22 @@ def _walk(project_dir: Path) -> Iterator[Path]:
             yield Path(root) / name
 
 
-def _is_marimo(path: Path) -> bool:
-    head = read_text(path, 2_000) or ""
+def _is_marimo(path: Path, project_dir: Path) -> bool:
+    head = read_text(path, project_dir, 2_000) or ""
     return "import marimo" in head and "marimo.App" in head
 
 
 def _project_signals(project_dir: Path, pyproject: str) -> list[str]:
     names = [m.group(1) for m in _PYPROJECT_DEP.finditer(pyproject)]
     for req in sorted(project_dir.glob("requirements*.txt")):
-        for line in (read_text(req) or "").splitlines():
+        for line in (read_text(req, project_dir) or "").splitlines():
             m = _REQUIREMENT.match(line)
             names += [m.group(1)] if m and not line.lstrip().startswith("#") else []
     found = {_DEPENDENCY_NAMES[n.lower()] for n in names if n.lower() in _DEPENDENCY_NAMES}
     for path in _walk(project_dir):
         if path.suffix == ".ipynb":
             found.add("jupyter")
-        elif path.suffix == ".py" and "marimo" not in found and _is_marimo(path):
+        elif path.suffix == ".py" and "marimo" not in found and _is_marimo(path, project_dir):
             found.add("marimo")
     return sorted(found & PROJECT_SIGNALS)
 
@@ -262,7 +298,7 @@ def collect_setup(
     Instruction files are sent in both modes: they are the setup the person
     asked to be coached on.
     """
-    pyproject = read_text(project_dir / "pyproject.toml") or ""
+    pyproject = read_text(project_dir / "pyproject.toml", project_dir) or ""
     instructions = _instructions(project_dir, home, sources)
     ignore = _ignore_lines(project_dir)
     hook_events, hook_tools = _hooks(project_dir, home, sources)

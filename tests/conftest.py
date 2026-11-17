@@ -64,6 +64,17 @@ def server() -> Iterator[StubServer]:
             stub.requests.append(Received(self.path, dict(self.headers), body))
             if stub.mode == "sleep":
                 stub.release.wait(5)
+            if stub.mode == "trickle":
+                # Headers, then one byte at a time: no socket read ever times out.
+                self.send_response(200)
+                self.send_header("Content-Length", "100")
+                self.end_headers()
+                for _ in range(10):
+                    if stub.release.wait(0.5):
+                        return
+                    self.wfile.write(b" ")
+                    self.wfile.flush()
+                return
             if stub.mode == "redirect":
                 self.send_response(307)
                 self.send_header("Location", stub.url + "/elsewhere")

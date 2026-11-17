@@ -31,6 +31,20 @@ GIT_TIMEOUT_S = 3.0
 TRUNCATED = "\n[promptcoach: diff truncated]\n"
 _DIFF_BYTES = MAX_DIFF_CHARS * 4  # UTF-8 never needs more for the cap
 _SMALL_BYTES = 1_000_000  # rev-parse, write-tree, ls-files
+# Overrides for repo-local settings that would make git run a program:
+# an fsmonitor hook, hooks, automatic maintenance. Filters are handled by
+# ``_repo_defines_filters`` and diff drivers by --no-ext-diff/--no-textconv.
+_SAFE_CONFIG = (
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    f"core.hooksPath={os.devnull}",
+    "-c",
+    "gc.auto=0",
+    "-c",
+    "maintenance.auto=false",
+)
+_TRUSTED_SCOPES = frozenset({"global", "system"})
 _DIFF_FLAGS = (
     "diff",
     "--no-color",
@@ -51,7 +65,7 @@ class GitOutput:
 
 def _env(index_file: Path | None = None) -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    env.update(GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0", LC_ALL="C")
+    env.update(GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0", GIT_CONFIG_NOSYSTEM="1", LC_ALL="C")
     if index_file is not None:
         env["GIT_INDEX_FILE"] = str(index_file)
     return env
@@ -73,7 +87,7 @@ def run_git(
     try:
         # git from PATH, as the agent runs it; the arguments are ours alone.
         proc = subprocess.Popen(  # noqa: S603
-            ["git", "--no-pager", *args],  # noqa: S607
+            ["git", "--no-pager", *_SAFE_CONFIG, *args],  # noqa: S607
             cwd=cwd,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -112,6 +126,24 @@ def repo_root(cwd: Path, timeout: float = GIT_TIMEOUT_S) -> Path | None:
     return Path(out.text.strip()) if out and out.text.strip() else None
 
 
+def _repo_defines_filters(root: Path, timeout: float = GIT_TIMEOUT_S) -> bool:
+    """True if the repo's own config defines a clean/smudge filter (or we can't tell).
+
+    Why: ``git add`` and a work-tree ``git diff`` run a filter's program on
+    file contents, and a repo's own ``.git/config`` (unlike the person's
+    global config) may come from someone else, e.g. an unpacked archive.
+    Such a repo gets no diff at all rather than a program run.
+    """
+    out = run_git(["config", "--show-scope", "--list"], root, timeout=timeout)
+    if out is None:
+        return True
+    for line in out.text.splitlines():
+        scope, _, entry = line.partition("\t")
+        if entry.lower().startswith("filter.") and scope not in _TRUSTED_SCOPES:
+            return True
+    return False
+
+
 def _scope() -> list[str]:
     return ["--", ".", *exclude_pathspecs()]
 
@@ -129,7 +161,7 @@ def snapshot(cwd: Path, index_file: Path, timeout: float = GIT_TIMEOUT_S) -> str
 
     try:
         root = repo_root(cwd, left())
-        if root is None:
+        if root is None or _repo_defines_filters(root, left()):
             return None
         real = run_git(["rev-parse", "--git-path", "index"], root, timeout=left())
         if real is None:
@@ -176,7 +208,7 @@ def collect_diff(cwd: Path) -> str | None:
     None when ``cwd`` isn't in a repo or git is missing.
     """
     root = repo_root(cwd)
-    if root is None:
+    if root is None or _repo_defines_filters(root):
         return None
     if run_git(["rev-parse", "--verify", "-q", "HEAD"], root) is not None:
         return _diff(["HEAD"], root)

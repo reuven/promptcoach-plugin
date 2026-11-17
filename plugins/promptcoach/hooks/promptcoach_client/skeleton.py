@@ -52,6 +52,37 @@ _SAY_PROGRAMS = frozenset(
         "export",
     }
 )
+# Words that start another program: its name is the next word.
+_WRAPPERS = frozenset(
+    {"sudo", "doas", "env", "time", "nice", "nohup", "timeout", "exec", "command",
+     "builtin", "xargs", "stdbuf", "npx", "uvx", "pipx", "bunx"}
+)  # fmt: skip
+# Subcommands worth keeping, per program; any other positional word goes.
+_SUBCOMMANDS: dict[str, frozenset[str]] = {
+    "uv": frozenset({"run", "sync", "add", "remove", "lock", "pip", "tool", "venv", "init",
+                     "build", "publish", "python", "tree", "export", "format", "install"}),
+    "git": frozenset({"status", "diff", "add", "commit", "push", "pull", "fetch", "log", "show",
+                      "checkout", "switch", "branch", "merge", "rebase", "stash", "restore",
+                      "reset", "init", "clone", "tag", "rm", "mv", "blame", "worktree"}),
+    "pip": frozenset({"install", "uninstall", "list", "freeze", "show", "check", "download"}),
+    "make": frozenset({"test", "tests", "check", "lint", "all", "build", "install", "clean",
+                       "format", "fmt", "typecheck", "docs", "coverage", "ci"}),
+    "npm": frozenset({"test", "run", "install", "ci", "build", "lint", "exec"}),
+    "ruff": frozenset({"check", "format"}),
+    "docker": frozenset({"build", "run", "ps", "compose", "up", "down", "logs", "exec",
+                         "images", "pull"}),
+    "cargo": frozenset({"test", "build", "run", "check", "clippy", "fmt"}),
+    "go": frozenset({"test", "build", "run", "vet", "fmt", "mod"}),
+    "pre-commit": frozenset({"run", "install", "autoupdate"}),
+}  # fmt: skip
+for _alias, _name in (("pip3", "pip"), ("pnpm", "npm"), ("yarn", "npm"), ("podman", "docker")):
+    _SUBCOMMANDS[_alias] = _SUBCOMMANDS[_name]
+# (program, subcommand) pairs whose next word is a program: ``uv run pytest``.
+_RUNS_PROGRAM = frozenset(
+    {("uv", "run"), ("uv", "tool"), ("npm", "exec"), ("pnpm", "exec"), ("yarn", "exec")}
+    | {(runner, "run") for runner in ("poetry", "pipenv", "pdm", "hatch", "conda", "pipx")}
+)
+_FILE_LIKE = re.compile(r"\.{1,2}|.*/.*|.*\.[A-Za-z][A-Za-z0-9]{0,7}")
 _SKILL = re.compile(r"[\w.:@/ -]{1,80}")
 
 Token = tuple[str, bool, bool]  # (text, is_operator, was_quoted)
@@ -98,7 +129,7 @@ def _plain_word(word: str) -> bool:
     return (
         bool(_BARE.fullmatch(word))
         and len(word) <= _MAX_WORD_CHARS
-        and not _BLOB.fullmatch(word)
+        and not any(_BLOB.fullmatch(part) for part in re.split(r"[./]", word))
         and not _WINDOWS_SHELL.search(word)
     )
 
@@ -119,28 +150,52 @@ def _flag(word: str) -> tuple[str | None, bool]:
 
 
 def _segment(words: list[tuple[str, bool]]) -> list[str]:
-    """The words kept from one command segment (between separators)."""
+    """The words kept from one command segment (between separators).
+
+    Kept: ``VAR=`` names, the program (and the program a wrapper or a
+    runner such as ``uv run`` starts), flags without values, the program's
+    known subcommands, and words that look like paths. Dropped: the word
+    after any flag (it may be the flag's value: ``-p hunter2``) and every
+    other positional word. The segment ends at the first quoted, odd or
+    code-carrying word.
+    """
     kept: list[str] = []
-    program_seen = False
+    program: str | None = None
+    expect_program = True
+    skip_value = False
     for word, quoted in words:
         if quoted or _ODD_DASH.search(word):
             break
-        if not program_seen and (env := _ENV_PREFIX.match(word)):
-            kept.append(env.group(1) + "=")
+        if skip_value:
+            skip_value = False
             continue
-        if program_seen and word.startswith("-"):
+        if program is not None and word.startswith("-"):
             flag, stop = _flag(word)
             if flag is not None:
                 kept.append(flag)
             if stop:
                 break
+            if flag == "-m" and program.startswith("python"):
+                expect_program = True
+            else:
+                skip_value = "=" not in word
+            continue
+        if expect_program and (env := _ENV_PREFIX.match(word)):
+            kept.append(env.group(1) + "=")
             continue
         if not _plain_word(word):
             break
-        kept.append(word)
-        program_seen = True
-        if word.rsplit("/", 1)[-1].lower() in _SAY_PROGRAMS:
-            break
+        if expect_program:
+            kept.append(word)
+            program = word.rsplit("/", 1)[-1].lower()
+            if program in _SAY_PROGRAMS:
+                break
+            expect_program = program in _WRAPPERS
+        elif program is not None and word in _SUBCOMMANDS.get(program, ()):
+            kept.append(word)
+            expect_program = (program, word) in _RUNS_PROGRAM
+        elif _FILE_LIKE.fullmatch(word):
+            kept.append(word)
     return kept
 
 
@@ -148,10 +203,9 @@ def command_skeleton(command: str) -> str:
     """The argv skeleton of a command line, as prompt-only mode sends it.
 
     Only the first line counts (split as ``str.splitlines`` splits, so a lone
-    CR or U+2028 can't hide a second one). Each segment keeps ``VAR=`` names
-    without values, the program, flags without values, and plain words, up
-    to the first word that is quoted, odd or code-like; a redirection drops
-    the rest of its segment. An unclosed quote keeps only the program name.
+    CR or U+2028 can't hide a second one). Each segment is cut down as
+    ``_segment`` says; a redirection drops the rest of its segment. An
+    unclosed quote keeps only the program name.
     """
     lines = command.replace("\x00", "").splitlines()
     line = lines[0] if lines else ""
