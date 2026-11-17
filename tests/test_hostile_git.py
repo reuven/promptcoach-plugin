@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -370,3 +371,92 @@ def test_borrows(tmp_path: Path) -> None:
     (git_dir / "commondir").unlink()
     (git_dir / "objects" / "info" / "alternates").mkdir()  # unreadable: refuse
     assert gitdiff._borrows(git_dir)
+
+
+# --- M1 follow-up: symlinks inside or as the git dir --------------------------------------
+
+
+def _assert_nothing_sent(server: StubServer) -> None:
+    assert "EMPLOYER" not in json.dumps(_diffs(server))
+    assert _diffs(server) == [None, None]
+
+
+def test_dot_git_symlink_to_another_repo_gets_no_diff(
+    server: StubServer, env: dict[str, str], project: Path, data_dir: Path, tmp_path: Path
+) -> None:
+    private = _private_repo(tmp_path)
+    (project / ".git").symlink_to(private / ".git")
+    _not_prompt_only(data_dir)
+
+    _turn(project, env, project / "readme.txt", "hi\n")
+
+    _assert_nothing_sent(server)
+
+
+def _borrowed_head(project: Path, private: Path) -> None:
+    """Point this repo's branch at the other repo's commit."""
+    branch = git(project, "symbolic-ref", "HEAD").strip()
+    ref = project / ".git" / branch
+    ref.parent.mkdir(parents=True, exist_ok=True)
+    ref.write_text(git(private, "rev-parse", "HEAD").strip() + "\n")
+
+
+def test_objects_symlink_to_another_repo_gets_no_diff(
+    server: StubServer, env: dict[str, str], project: Path, data_dir: Path, tmp_path: Path
+) -> None:
+    private = _private_repo(tmp_path)
+    git(project, "init", "-q")
+    shutil.rmtree(project / ".git" / "objects")
+    (project / ".git" / "objects").symlink_to(private / ".git" / "objects")
+    _borrowed_head(project, private)
+    _not_prompt_only(data_dir)
+
+    _turn(project, env, project / "readme.txt", "hi\n")
+
+    _assert_nothing_sent(server)
+
+
+def test_object_fanout_symlinks_get_no_diff(
+    server: StubServer, env: dict[str, str], project: Path, data_dir: Path, tmp_path: Path
+) -> None:
+    private = _private_repo(tmp_path)
+    git(project, "init", "-q")
+    for fanout in (private / ".git" / "objects").iterdir():
+        if len(fanout.name) == 2:
+            (project / ".git" / "objects" / fanout.name).symlink_to(fanout)
+    _borrowed_head(project, private)
+    _not_prompt_only(data_dir)
+
+    _turn(project, env, project / "readme.txt", "hi\n")
+
+    _assert_nothing_sent(server)
+
+
+def test_refs_symlink_to_another_repo_gets_no_diff(
+    server: StubServer, env: dict[str, str], project: Path, data_dir: Path, tmp_path: Path
+) -> None:
+    private = _private_repo(tmp_path)
+    git(project, "init", "-q")
+    shutil.rmtree(project / ".git" / "objects")
+    shutil.copytree(private / ".git" / "objects", project / ".git" / "objects")
+    shutil.rmtree(project / ".git" / "refs")
+    (project / ".git" / "refs").symlink_to(private / ".git" / "refs")
+    _not_prompt_only(data_dir)
+
+    _turn(project, env, project / "readme.txt", "hi\n")
+
+    _assert_nothing_sent(server)
+
+
+@pytest.mark.parametrize("entry", ["HEAD", "packed-refs", "commondir", "objects/info/alternates"])
+def test_symlinked_git_dir_entries_are_refused(entry: str, tmp_path: Path) -> None:
+    git_dir = tmp_path / "repo" / ".git"
+    (git_dir / "objects" / "info").mkdir(parents=True)
+    (git_dir / "refs").mkdir()
+    (git_dir / "HEAD").write_text("ref: refs/heads/main\n")
+    assert gitdiff._entries_stay_inside(git_dir)
+    target = tmp_path / "elsewhere"
+    target.write_text("x\n")
+    (git_dir / entry).unlink(missing_ok=True)
+    (git_dir / entry).symlink_to(target)
+    assert not gitdiff._entries_stay_inside(git_dir)
