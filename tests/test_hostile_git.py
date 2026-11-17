@@ -448,27 +448,33 @@ def test_refs_symlink_to_another_repo_gets_no_diff(
     _assert_nothing_sent(server)
 
 
-@pytest.mark.parametrize("entry", ["HEAD", "packed-refs", "commondir", "objects/info/alternates"])
+@pytest.mark.parametrize(
+    "entry", ["HEAD", "packed-refs", "commondir", "objects/info/alternates", "refs/heads/x"]
+)
 def test_symlinked_git_dir_entries_are_refused(entry: str, tmp_path: Path) -> None:
     git_dir = tmp_path / "repo" / ".git"
     (git_dir / "objects" / "info").mkdir(parents=True)
-    (git_dir / "refs").mkdir()
+    (git_dir / "refs" / "heads").mkdir(parents=True)
     (git_dir / "HEAD").write_text("ref: refs/heads/main\n")
-    assert gitdiff._entries_stay_inside(git_dir)
+    assert gitdiff._no_symlinks(git_dir, gitdiff.Deadline(10))
     target = tmp_path / "elsewhere"
     target.write_text("x\n")
     (git_dir / entry).unlink(missing_ok=True)
     (git_dir / entry).symlink_to(target)
-    assert not gitdiff._entries_stay_inside(git_dir)
+    assert not gitdiff._no_symlinks(git_dir, gitdiff.Deadline(10))
 
 
-def test_git_dir_entry_check_edge_cases(
+def test_git_dir_walk_edge_cases(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, repo: Path
 ) -> None:
-    assert not gitdiff._entries_stay_inside(tmp_path / "missing")
-    assert gitdiff._entries_stay_inside(repo / ".git")
-    monkeypatch.setattr(gitdiff, "_MAX_REF_ENTRIES", 3)
-    assert not gitdiff._entries_stay_inside(repo / ".git")  # too many refs to check
+    assert not gitdiff._no_symlinks(tmp_path / "missing", gitdiff.Deadline(10))
+    assert gitdiff._no_symlinks(repo / ".git", gitdiff.Deadline(10))
+    assert not gitdiff._no_symlinks(repo / ".git", gitdiff.Deadline(-1))  # no time left
+    monkeypatch.setattr(gitdiff, "_GIT_DIR_WALK_S", 0.0)
+    assert not gitdiff._no_symlinks(repo / ".git", gitdiff.Deadline(10))  # walk budget spent
+    monkeypatch.setattr(gitdiff, "_GIT_DIR_WALK_S", 0.3)
+    monkeypatch.setattr(gitdiff, "_MAX_GIT_DIR_ENTRIES", 3)
+    assert not gitdiff._no_symlinks(repo / ".git", gitdiff.Deadline(10))  # too big to check
 
 
 def test_worktree_with_a_symlinked_head_is_refused(repo: Path, tmp_path: Path) -> None:
@@ -476,9 +482,77 @@ def test_worktree_with_a_symlinked_head_is_refused(repo: Path, tmp_path: Path) -
     git(repo, "worktree", "add", "-q", str(tree))
     common = repo / ".git"
     wt_dir = common / "worktrees" / "wt"
-    assert gitdiff._own_git_dir(tree, wt_dir, common)
+    assert gitdiff._own_git_dir(tree, wt_dir, common, gitdiff.Deadline(10))
     target = tmp_path / "head"
     target.write_text((wt_dir / "HEAD").read_text())
     (wt_dir / "HEAD").unlink()
     (wt_dir / "HEAD").symlink_to(target)
-    assert not gitdiff._own_git_dir(tree, wt_dir, common)
+    assert not gitdiff._own_git_dir(tree, wt_dir, common, gitdiff.Deadline(10))
+
+
+# --- controller ruling: one lstat walk of the whole git dir ------------------------------
+
+
+def _first_object_dir(repo: Path) -> Path:
+    return next(p for p in (repo / ".git" / "objects").iterdir() if len(p.name) == 2)
+
+
+@pytest.mark.parametrize("where", ["fanout", "pack", "index", "info/grafts", "shallow"])
+def test_any_symlink_in_the_git_dir_means_no_diff(
+    where: str,
+    server: StubServer,
+    env: dict[str, str],
+    repo: Path,
+    data_dir: Path,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "elsewhere"
+    target.write_text("x\n")
+    dot_git = repo / ".git"
+    link = {
+        "fanout": _first_object_dir(repo) / ("0" * 38),
+        "pack": dot_git / "objects" / "pack" / "pack-x.pack",
+        "index": dot_git / "index",
+        "info/grafts": dot_git / "info" / "grafts",
+        "shallow": dot_git / "shallow",
+    }[where]
+    if where == "index":
+        target.write_bytes(link.read_bytes())
+        link.unlink()
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(target)
+    _not_prompt_only(data_dir)
+
+    _turn(repo, env, repo / "app.py", "print('v2')\n")
+
+    assert _diffs(server) == [None, None]
+
+
+def test_large_normal_repo_still_diffs(
+    server: StubServer, env: dict[str, str], repo: Path, data_dir: Path
+) -> None:
+    for i in range(2_000):
+        (repo / f"f{i}.txt").write_text(f"{i}\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "many")
+    assert sum(1 for _ in (repo / ".git").rglob("*")) > 2_000
+    _not_prompt_only(data_dir)
+
+    _turn(repo, env, repo / "app.py", "print('v2')\n")
+
+    assert all(isinstance(d, str) and "+print('v2')" in d for d in _diffs(server))
+
+
+def test_git_dir_over_the_cap_means_no_diff(
+    server: StubServer,
+    env: dict[str, str],
+    repo: Path,
+    data_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(gitdiff, "_MAX_GIT_DIR_ENTRIES", 10)
+    _not_prompt_only(data_dir)
+
+    _turn(repo, env, repo / "app.py", "print('v2')\n")
+
+    assert _diffs(server) == [None, None]
