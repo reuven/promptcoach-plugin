@@ -185,18 +185,34 @@ def _same(a: Path, b: Path) -> bool:
         return False
 
 
-def _own_git_dir(root: Path, git_dir: Path, common_dir: Path) -> bool:
-    """True if ``git_dir`` is the work tree's own: ``<root>/.git``, or a linked
-    worktree's directory whose main repo lists ``<root>`` as that worktree.
+def _borrows(git_dir: Path) -> bool:
+    """True if a git dir takes refs or objects from elsewhere: a ``commondir``
+    file, or a non-empty ``objects/info/alternates``."""
+    if (git_dir / "commondir").exists():
+        return True
+    try:
+        alternates = (git_dir / "objects" / "info" / "alternates").read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return False
+    except (OSError, UnicodeDecodeError):
+        return True
+    return bool(alternates.strip())
 
-    Why: a ``.git`` file (``gitdir: /elsewhere``) or ``core.worktree`` in an
+
+def _own_git_dir(root: Path, git_dir: Path, common_dir: Path) -> bool:
+    """True if ``git_dir`` is the work tree's own: ``<root>/.git`` holding its
+    own refs and objects, or a linked worktree's directory whose main repo
+    lists ``<root>`` as that worktree.
+
+    Why: a ``.git`` file (``gitdir: /elsewhere``), ``core.worktree``, or a
+    ``.git`` directory with a ``commondir`` file or ``alternates`` in an
     unpacked archive could point git at another of the person's repos, and
     its committed files would then go out as this turn's diff.
     """
     if _same(git_dir, root / ".git"):
-        return True
+        return _same(common_dir, git_dir) and not _borrows(git_dir)
     worktrees = common_dir / "worktrees"
-    if not _same(git_dir.parent, worktrees):
+    if not _same(git_dir.parent, worktrees) or _borrows(common_dir):
         return False
     try:
         listed = (git_dir / "gitdir").read_text(encoding="utf-8").strip()

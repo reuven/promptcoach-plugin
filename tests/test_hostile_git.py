@@ -359,3 +359,14 @@ def test_empty_alternates_file_is_harmless(
     _turn(repo, env, repo / "app.py", "print('v2')\n")
 
     assert all(isinstance(d, str) and "+print('v2')" in d for d in _diffs(server))
+
+
+def test_borrows(tmp_path: Path) -> None:
+    git_dir = tmp_path / ".git"
+    (git_dir / "objects" / "info").mkdir(parents=True)
+    assert not gitdiff._borrows(git_dir)
+    (git_dir / "commondir").write_text("../elsewhere\n")
+    assert gitdiff._borrows(git_dir)
+    (git_dir / "commondir").unlink()
+    (git_dir / "objects" / "info" / "alternates").mkdir()  # unreadable: refuse
+    assert gitdiff._borrows(git_dir)
