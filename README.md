@@ -80,8 +80,9 @@ fsmonitor hook, hooks, diff drivers), never fetches (a partial clone's
 missing objects stay missing), and shows a submodule only as a commit line,
 never its files. A repository whose own config defines a clean/smudge filter
 gets no diff at all, and so does one whose `.git` points somewhere else (a
-`gitdir:` file, `core.worktree`, a `commondir` file or `alternates`), unless
-it is a linked worktree that its main repository lists. Files are read only where they are: a `CLAUDE.md` or `.claude/` that is
+`gitdir:` file, `core.worktree`, a `commondir` file, `alternates`, or a
+`.git` that is, or contains, a symlink where refs or objects live), unless it
+is a linked worktree that its main repository lists. Files are read only where they are: a `CLAUDE.md` or `.claude/` that is
 a symlink out of the project (or out of your home directory, for the global
 files), or to a credential file, is treated as absent.
 

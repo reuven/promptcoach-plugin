@@ -460,3 +460,25 @@ def test_symlinked_git_dir_entries_are_refused(entry: str, tmp_path: Path) -> No
     (git_dir / entry).unlink(missing_ok=True)
     (git_dir / entry).symlink_to(target)
     assert not gitdiff._entries_stay_inside(git_dir)
+
+
+def test_git_dir_entry_check_edge_cases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, repo: Path
+) -> None:
+    assert not gitdiff._entries_stay_inside(tmp_path / "missing")
+    assert gitdiff._entries_stay_inside(repo / ".git")
+    monkeypatch.setattr(gitdiff, "_MAX_REF_ENTRIES", 3)
+    assert not gitdiff._entries_stay_inside(repo / ".git")  # too many refs to check
+
+
+def test_worktree_with_a_symlinked_head_is_refused(repo: Path, tmp_path: Path) -> None:
+    tree = tmp_path / "wt"
+    git(repo, "worktree", "add", "-q", str(tree))
+    common = repo / ".git"
+    wt_dir = common / "worktrees" / "wt"
+    assert gitdiff._own_git_dir(tree, wt_dir, common)
+    target = tmp_path / "head"
+    target.write_text((wt_dir / "HEAD").read_text())
+    (wt_dir / "HEAD").unlink()
+    (wt_dir / "HEAD").symlink_to(target)
+    assert not gitdiff._own_git_dir(tree, wt_dir, common)
