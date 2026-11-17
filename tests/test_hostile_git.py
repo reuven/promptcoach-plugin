@@ -297,3 +297,65 @@ def test_same_size_edit_with_an_unchanged_mtime_is_seen(repo: Path, tmp_path: Pa
 
     assert before is not None and after is not None
     assert before != after
+
+
+# --- M1 follow-up: a real .git directory that borrows another repo ---------------------
+
+
+def _private_repo(tmp_path: Path) -> Path:
+    private = tmp_path / "private"
+    private.mkdir()
+    git(private, "init", "-q")
+    (private / "core.py").write_text("EMPLOYER_CODE = 'top secret algorithm'\n")
+    git(private, "add", "-A")
+    git(private, "commit", "-q", "-m", "i")
+    return private
+
+
+def test_commondir_in_a_real_git_dir_gets_no_diff(
+    server: StubServer, env: dict[str, str], project: Path, data_dir: Path, tmp_path: Path
+) -> None:
+    private = _private_repo(tmp_path)
+    dot_git = project / ".git"
+    dot_git.mkdir()
+    (dot_git / "HEAD").write_text((private / ".git" / "HEAD").read_text())
+    (dot_git / "commondir").write_text(f"{private / '.git'}\n")
+    _not_prompt_only(data_dir)
+
+    _turn(project, env, project / "readme.txt", "hi\n")
+
+    assert "EMPLOYER" not in json.dumps(_diffs(server))
+    assert _diffs(server) == [None, None]
+
+
+def test_alternates_to_another_repo_get_no_diff(
+    server: StubServer, env: dict[str, str], project: Path, data_dir: Path, tmp_path: Path
+) -> None:
+    private = _private_repo(tmp_path)
+    git(project, "init", "-q")
+    head = git(private, "rev-parse", "HEAD").strip()
+    branch = git(project, "symbolic-ref", "HEAD").strip()
+    (project / ".git" / "objects" / "info" / "alternates").write_text(
+        f"{private / '.git' / 'objects'}\n"
+    )
+    ref = project / ".git" / branch
+    ref.parent.mkdir(parents=True, exist_ok=True)
+    ref.write_text(head + "\n")
+    _not_prompt_only(data_dir)
+
+    _turn(project, env, project / "readme.txt", "hi\n")
+
+    assert "EMPLOYER" not in json.dumps(_diffs(server))
+    assert _diffs(server) == [None, None]
+
+
+def test_empty_alternates_file_is_harmless(
+    server: StubServer, env: dict[str, str], repo: Path, data_dir: Path
+) -> None:
+    (repo / ".git" / "objects" / "info").mkdir(parents=True, exist_ok=True)
+    (repo / ".git" / "objects" / "info" / "alternates").write_text("\n")
+    _not_prompt_only(data_dir)
+
+    _turn(repo, env, repo / "app.py", "print('v2')\n")
+
+    assert all(isinstance(d, str) and "+print('v2')" in d for d in _diffs(server))
