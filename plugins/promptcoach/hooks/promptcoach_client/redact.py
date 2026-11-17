@@ -95,9 +95,12 @@ _SECRET_PARTS = frozenset(
     }
 )
 _SECRET_PAIRS = frozenset({("api", "key"), ("private", "key")})
-# An UPPER_CASE name also counts when it merely contains one (PGPASSWORD).
+# A name also counts when it merely contains one of these (PGPASSWORD,
+# githubtoken, tokenizer: redacting a little too much is the safe side).
+_SECRET_SUBSTRING = re.compile(
+    r"PASSWORD|PASSWD|SECRET|TOKEN|API_?KEY|PRIVATE_?KEY|CREDENTIAL", re.IGNORECASE
+)
 _ENV_STYLE = re.compile(r"[A-Z0-9_.-]*[A-Z][A-Z0-9_.-]*")
-_ENV_SECRET = re.compile(r"PASSWORD|PASSWD|SECRET|TOKEN|APIKEY|API_KEY|PRIVATE_KEY")
 # The words a count of tokens is named with (max_tokens, cache_read_tokens).
 _COUNT_PARTS = frozenset(
     {
@@ -128,7 +131,15 @@ _COUNT_PARTS = frozenset(
 _NUMBER = re.compile(r"[-+]?[0-9][0-9_]*(?:\.[0-9]+)?[,;)]?")
 _ANNOTATION = re.compile(r"[A-Za-z_][A-Za-z0-9_.]*(?:[ ]?[\[\]|,][ ]?[A-Za-z0-9_.]*)*[,;)]?")
 _IDENTIFIER = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)[,;)]?")
-_CALL = re.compile(r"[A-Za-z_][A-Za-z0-9_.]*[ ]?[(\[]")
+# A whole value that is one call or subscript of plain arguments:
+# get_password(), os.environ["API_KEY"], os.getenv("X", None),
+# client.secrets.get(name). A quoted argument must be an UPPER_CASE
+# environment variable's name; nothing may follow the group.
+_DOTTED = r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*"
+_ARG = rf"(?:[A-Za-z_][A-Za-z0-9_]*=)?(?:{_DOTTED}|[-+]?[0-9][0-9_.]*)"
+_ENV_NAME = r"\"[A-Z][A-Z0-9_]*\"|'[A-Z][A-Z0-9_]*'"
+_ARGS = rf"(?:(?:{_ENV_NAME}|{_ARG})(?:,[ ]?{_ARG})*)?"
+_CALL = re.compile(rf"{_DOTTED}[ ]?(?:\({_ARGS}\)|\[{_ARGS}\])[,)]?")
 _VALUE_LOOK = 256  # how much of a value is looked at: keeps a long line linear
 
 # Programs that print the environment: printenv always; env with no program
@@ -210,7 +221,7 @@ def _parts(name: str) -> list[str]:
 
 def _is_secret_name(name: str) -> bool:
     """True if a name says password, secret, token, key or credential."""
-    if _ENV_STYLE.fullmatch(name) and _ENV_SECRET.search(name):
+    if _SECRET_SUBSTRING.search(name):
         return True
     parts = _parts(name)
     return any(p in _SECRET_PARTS for p in parts) or any(
@@ -242,7 +253,7 @@ def _keeps_value(name: str, separator: str, after: str) -> bool:
     same = _IDENTIFIER.fullmatch(value)
     if same and same[1] in (name, name.rsplit(".", 1)[-1]):
         return True
-    return bool(_CALL.match(value))
+    return bool(_CALL.fullmatch(value))
 
 
 def _next_line_value(text: str, line_start: int, end: int) -> tuple[int, int] | None:
