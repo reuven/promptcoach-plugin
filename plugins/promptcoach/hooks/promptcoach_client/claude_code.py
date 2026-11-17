@@ -154,7 +154,13 @@ def emit(reply: core.Reply | None, stdout: TextIO, *, allow_block: bool) -> None
     stdout.flush()
 
 
-def main(argv: list[str], stdin: TextIO, stdout: TextIO, env: Mapping[str, str]) -> int:
+def main(
+    argv: list[str],
+    stdin: TextIO,
+    stdout: TextIO,
+    env: Mapping[str, str],
+    started: float | None = None,
+) -> int:
     """Run one hook: ``before``, ``record`` or ``after``. Always returns 0.
 
     Nothing here may break the person's session, so any failure, ours or
@@ -169,7 +175,7 @@ def main(argv: list[str], stdin: TextIO, stdout: TextIO, env: Mapping[str, str])
         gitdiff.install_cleanup()
         if mode == "before":
             emit(
-                core.before(prompt_submitted(payload, env), config, PROFILE),
+                core.before(prompt_submitted(payload, env), config, PROFILE, started),
                 stdout,
                 allow_block=True,
             )

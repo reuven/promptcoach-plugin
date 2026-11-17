@@ -61,11 +61,10 @@ from .skeleton import command_skeleton
 DEFAULT_SERVER_URL = "https://coach.lernerpython.com"
 # Each hook's whole budget, inside the agent's timeout (3 s and 15 s) with
 # room for Python to start and stop; the request's own cap within it.
-BEFORE_BUDGET_S = 2.6
+BEFORE_BUDGET_S = 2.5  # from the hook's start: Claude Code allows 3
 BEFORE_HTTP_TIMEOUT_S = 1.8  # the server answers within 1.4 s
 AFTER_BUDGET_S = 13.5
 AFTER_HTTP_TIMEOUT_S = 12.0
-JOIN_GRACE_S = 0.2  # for a git call stopped at the deadline to be killed
 MAX_COMMAND_PROMPT_CHARS = 1_000  # a coach command is short
 REDACT_WINDOW_CHARS = 64_000  # output redacted before its tail is kept
 MAX_REPLY_BYTES = 256_000
@@ -479,7 +478,12 @@ def _capabilities(profile: AgentProfile) -> dict[str, bool]:
     }
 
 
-def before(event: PromptSubmitted, config: Config, profile: AgentProfile) -> Reply | None:
+def before(
+    event: PromptSubmitted,
+    config: Config,
+    profile: AgentProfile,
+    started: float | None = None,
+) -> Reply | None:
     """Coach a prompt before the agent sees it.
 
     The start-of-turn snapshot is taken alongside the request (unless the
@@ -488,7 +492,7 @@ def before(event: PromptSubmitted, config: Config, profile: AgentProfile) -> Rep
     dropped; the server may block only a coach command. The reply is
     built before any state is saved, and saving is best effort.
     """
-    deadline = gitdiff.Deadline(BEFORE_BUDGET_S)
+    deadline = gitdiff.Deadline(BEFORE_BUDGET_S, started)
     store = Store(config.data_dir)
     store.sweep(time.time())
     if not _valid_ids(event.session_id, event.prompt_id):
@@ -526,7 +530,7 @@ def before(event: PromptSubmitted, config: Config, profile: AgentProfile) -> Rep
     url = endpoint(config.server_url, "/v1/before")
     reply = parse_reply(post(url, config.token, body, deadline.left(BEFORE_HTTP_TIMEOUT_S)))
     if snapper is not None:
-        snapper.join(deadline.left() + JOIN_GRACE_S)
+        snapper.join(deadline.left())  # a git still running is killed at exit
     if reply is not None and reply.block and not is_coach_command(event.prompt):
         reply = Reply(reply.message, False, reply.prompt_only)
     if reply is not None:
@@ -639,7 +643,8 @@ def after(event: TurnEnded, config: Config, profile: AgentProfile) -> Reply | No
         diff = _turn_diff(event, config, start_tree, deadline)
     reply_text = None
     if profile.capabilities.has_reply and event.reply is not None and not prompt_only:
-        reply_text = redact(event.reply[-MAX_REPLY_CHARS:])[-MAX_REPLY_CHARS:]
+        # Redacted before it is cut, so a key the cut would split is caught whole.
+        reply_text = redact(event.reply[-(MAX_REPLY_CHARS + 4096) :])[-MAX_REPLY_CHARS:]
     body = {
         "agent": profile.agent,
         "plugin_version": profile.plugin_version,

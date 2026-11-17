@@ -87,8 +87,9 @@ class Deadline:
     is skipped, so the hook as a whole ends on time.
     """
 
-    def __init__(self, seconds: float) -> None:
-        self.end = time.monotonic() + seconds
+    def __init__(self, seconds: float, start: float | None = None) -> None:
+        """``seconds`` from ``start`` (a ``time.monotonic()`` reading; now if None)."""
+        self.end = (time.monotonic() if start is None else start) + seconds
 
     def left(self, cap: float = math.inf) -> float:
         """Seconds left, at most ``cap``; never negative."""
@@ -120,6 +121,13 @@ _PREVIOUS_TERM: Any = signal.SIG_DFL
 _CLEANUP_INSTALLED: list[bool] = []
 
 
+# Held while git starts and is recorded in _LIVE, so the SIGTERM handler
+# (which runs in the main thread) can't run in between and miss it.
+# Reentrant: a SIGTERM that arrived just before the mask is handled in the
+# main thread, maybe while that same thread holds this; it mustn't deadlock.
+_STARTING = threading.RLock()
+
+
 def _kill_live() -> None:
     """Kill every git process group still running."""
     for pgid in list(_LIVE):
@@ -130,7 +138,8 @@ def _kill_live() -> None:
 
 def _on_term(signum: int, frame: object) -> None:
     """SIGTERM: kill the running git first, then do what SIGTERM did before."""
-    _kill_live()
+    with _STARTING:
+        _kill_live()
     if callable(_PREVIOUS_TERM):
         _PREVIOUS_TERM(signum, frame)
         return
@@ -188,20 +197,28 @@ def run_git(
     """
     if timeout < _MIN_STEP_S:
         return None
+    # SIGTERM is blocked in this thread, and the handler kept out by the
+    # lock, from git's start until it is in _LIVE: a stop then always finds
+    # it. (git inherits the blocked SIGTERM; it is always stopped with
+    # SIGKILL, so that changes nothing.)
+    mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
     try:
-        # git from PATH, as the agent runs it; the arguments are ours alone.
-        proc = subprocess.Popen(  # noqa: S603
-            ["git", "--no-pager", *_SAFE_CONFIG, *args],  # noqa: S607
-            cwd=cwd,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            env=_env(index_file),
-            start_new_session=True,
-        )
+        with _STARTING:
+            # git from PATH, as the agent runs it; the arguments are ours alone.
+            proc = subprocess.Popen(  # noqa: S603
+                ["git", "--no-pager", *_SAFE_CONFIG, *args],  # noqa: S607
+                cwd=cwd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                env=_env(index_file),
+                start_new_session=True,
+            )
+            _LIVE.add(proc.pid)
     except OSError:  # git missing, cwd gone
         return None
-    _LIVE.add(proc.pid)
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, mask)
     chunks: list[bytes] = []
     stdout = proc.stdout
     assert stdout is not None  # noqa: S101 - PIPE always sets it

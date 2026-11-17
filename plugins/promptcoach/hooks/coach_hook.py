@@ -10,8 +10,10 @@ newer syntax), since the ``python3`` on a Mac may be too old for the client.
 import json
 import os
 import sys
+import time
 from typing import Mapping, TextIO  # noqa: UP035 - must import on old Pythons
 
+STARTED = time.monotonic()  # the before hook's budget counts from here
 MIN_PYTHON = (3, 9)
 OLD_PYTHON_MESSAGE = (
     "Prompt coach needs Python 3.9 or newer, and python3 here is {}.{}. "
@@ -52,7 +54,7 @@ def run(argv: "list[str]", stdin: TextIO, stdout: TextIO, env: "Mapping[str, str
         sys.path.insert(0, here)
     from promptcoach_client.claude_code import main
 
-    return main(argv, stdin, stdout, env)
+    return main(argv, stdin, stdout, env, STARTED)
 
 
 if __name__ == "__main__":

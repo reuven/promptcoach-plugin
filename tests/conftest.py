@@ -22,14 +22,31 @@ from promptcoach_client.claude_code import main
 # hanging the run and holding a test slot. SIGALRM interrupts a blocking
 # system call in the main thread; no plugin needed, and it works on 3.9.
 TEST_TIMEOUT_S = 120
+TIMED_OUT: list[bool] = []  # set when the alarm fires, even if something eats it
+
+
+class TestTimedOut(BaseException):
+    """A test ran too long. Not an Exception (nor an OSError, as TimeoutError
+    is), so the hook's own ``except Exception`` can't swallow it."""
+
+    __test__ = False
 
 
 def _too_slow(signum: int, frame: object) -> None:
-    raise TimeoutError(f"test ran longer than {TEST_TIMEOUT_S} s")
+    TIMED_OUT.append(True)
+    raise TestTimedOut(f"test ran longer than {TEST_TIMEOUT_S} s")
+
+
+def fail_if_timed_out() -> None:
+    """Fail the test if its alarm fired, whatever happened to the exception."""
+    if TIMED_OUT:
+        TIMED_OUT.clear()
+        pytest.fail(f"test ran longer than {TEST_TIMEOUT_S} s")
 
 
 @pytest.fixture(autouse=True)
 def _per_test_timeout() -> Iterator[None]:
+    TIMED_OUT.clear()
     previous = signal.signal(signal.SIGALRM, _too_slow)
     signal.alarm(TEST_TIMEOUT_S)
     try:
@@ -37,6 +54,7 @@ def _per_test_timeout() -> Iterator[None]:
     finally:
         signal.alarm(0)
         signal.signal(signal.SIGALRM, previous)
+    fail_if_timed_out()
 
 
 TOKEN = "pc_" + "t" * 43  # the server's token shape; a dummy

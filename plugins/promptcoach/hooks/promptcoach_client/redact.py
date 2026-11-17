@@ -37,25 +37,63 @@ from .forbidden import (
 
 REDACTED = "[REDACTED]"
 
+# Token shapes. Distinctive prefixes match anywhere, glued to anything
+# ("\\nsk-ant-...", "x_ghp_...", "1AKIA..."); short generic ones only where
+# no letter comes right before, so "task-management-..." isn't "sk-...".
+_NO_LETTER = r"(?<![A-Za-z])"
 _TOKENS = re.compile(
     "|".join(
         [
-            r"\bsk-(?:ant-)?[A-Za-z0-9_-]{12,}",
-            r"\b(?:ghp|gho|ghs|ghu|ghr)_[A-Za-z0-9]{20,}",
-            r"\bgithub_pat_[A-Za-z0-9_]{20,}",
-            r"\bxox[abp]-[A-Za-z0-9-]{10,}",
-            r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b",
-            r"\bAIza[A-Za-z0-9_-]{30,}",
-            r"\bglpat-[A-Za-z0-9_-]{20,}",
-            r"\bBearer [A-Za-z0-9._~+/=-]{16,}",
-            r"\b[srp]k_(?:live|test)_[A-Za-z0-9]{10,}",
-            r"\bhf_[A-Za-z0-9]{20,}",
-            r"\bnpm_[A-Za-z0-9]{30,}",
-            r"\bya29\.[A-Za-z0-9_-]{10,}",
-            r"\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*",
+            r"sk-ant-[A-Za-z0-9_-]{12,}",
+            _NO_LETTER + r"sk-[A-Za-z0-9_-]{12,}",
+            r"(?:ghp|gho|ghs|ghu|ghr)_[A-Za-z0-9]{20,}",
+            r"github_pat_[A-Za-z0-9_]{20,}",
+            r"xox[abp]-[A-Za-z0-9-]{10,}",
+            r"(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Z0-9])",
+            r"AIza[A-Za-z0-9_-]{30,}",
+            r"glpat-[A-Za-z0-9_-]{20,}",
+            _NO_LETTER + r"Bearer [A-Za-z0-9._~+/=-]{16,}",
+            _NO_LETTER + r"[srp]k_(?:live|test)_[A-Za-z0-9]{10,}",
+            _NO_LETTER + r"hf_[A-Za-z0-9]{20,}",
+            _NO_LETTER + r"npm_[A-Za-z0-9]{30,}",
+            r"ya29\.[A-Za-z0-9_-]{10,}",
+            _NO_LETTER + r"eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*",
         ]
     )
 )
+_CREDENTIAL_WORDS = r"(?:password|passwd|secret|token|api_?key)"
+# Command-line and markup forms: --password VALUE, mysql/docker login -p,
+# -u user:pass, <password>...</password>, key="DbPassword" value="...",
+# and login("user", "pass").
+_FORMS = [
+    re.compile(
+        r"((?<![A-Za-z0-9_-])--(?:password|passwd|token|secret|api-key|api_key|apikey)"
+        r"(?:=|[ \t]+))(?![-\s])\S+",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"((?<![A-Za-z0-9_-])(?:mysql|mysqldump|mysqladmin|mariadb|(?:docker|podman)[ \t]+login)"
+        r"(?:[ \t]+\S+){0,12}?[ \t]+-p[ \t]*)(?![-\s])\S+"
+    ),
+    re.compile(r"((?<![A-Za-z0-9_-])(?:-u|--user)[ \t]+[^\s:]{1,200}:)\S+"),
+    re.compile(
+        r"(<((?:[A-Za-z0-9_-]{1,40}:)?[A-Za-z0-9_-]{0,40}"
+        + _CREDENTIAL_WORDS
+        + r"[A-Za-z0-9_-]{0,40})>)"
+        r"[^<\n]*(?P<tail></\2>)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"((?<![A-Za-z0-9_-])(?:key|name)[ \t]*=[ \t]*([\"'])[^\"'\n]{0,80}"
+        + _CREDENTIAL_WORDS
+        + r"[^\"'\n]{0,80}\2[ \t]+value[ \t]*=[ \t]*[\"'])[^\"'\n]*",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"((?<![A-Za-z0-9_])login\([ \t]*(?:\"[^\"\n]{0,200}\"|'[^'\n]{0,200}')[ \t]*,[ \t]*)"
+        r"(?:\"[^\"\n]*\"|'[^'\n]*')"
+    ),
+]
 # Kept: the header name and scheme. Gone: the credential after it.
 _AUTH = re.compile(
     r"(\bAuthorization[\"']?[ \t]{0,8}[:=][ \t]{0,8}[\"']?(?:Basic|Bearer|Token)[ \t]{1,8})"
@@ -129,17 +167,26 @@ _COUNT_PARTS = frozenset(
     }
 )
 _NUMBER = re.compile(r"[-+]?[0-9][0-9_]*(?:\.[0-9]+)?[,;)]?")
+_INDENT = re.compile(r"[ \t]*")
 _ANNOTATION = re.compile(r"[A-Za-z_][A-Za-z0-9_.]*(?:[ ]?[\[\]|,][ ]?[A-Za-z0-9_.]*)*[,;)]?")
 _IDENTIFIER = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)[,;)]?")
-# A whole value that is one call or subscript of plain arguments:
-# get_password(), os.environ["API_KEY"], os.getenv("X", None),
-# client.secrets.get(name). A quoted argument must be an UPPER_CASE
-# environment variable's name; nothing may follow the group.
+# A whole value that is one call or subscript of plain names:
+# get_password(), client.secrets.get(name). Only an environment lookup
+# (os.environ[...], os.getenv(...), environ.get(...)) may take a quoted
+# argument, and only an UPPER_CASE variable name. No literal argument
+# anywhere: numbers, other strings and UPPER_CASE tokens with digits
+# (KEY_9F8E...) are values. Nothing may follow the group.
 _DOTTED = r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*"
-_ARG = rf"(?:[A-Za-z_][A-Za-z0-9_]*=)?(?:{_DOTTED}|[-+]?[0-9][0-9_.]*)"
+_ARG = rf"(?:[A-Za-z_][A-Za-z0-9_]*=)?{_DOTTED}"
+_ARGS = rf"(?:{_ARG}(?:,[ ]?{_ARG})*)?"
 _ENV_NAME = r"\"[A-Z][A-Z0-9_]*\"|'[A-Z][A-Z0-9_]*'"
-_ARGS = rf"(?:(?:{_ENV_NAME}|{_ARG})(?:,[ ]?{_ARG})*)?"
-_CALL = re.compile(rf"{_DOTTED}[ ]?(?:\({_ARGS}\)|\[{_ARGS}\])[,)]?")
+_ENV_ARGS = rf"(?:(?:{_ENV_NAME})(?:,[ ]?{_ARG})*|{_ARGS})"
+_ENV_CALLEE = r"(?:os\.environ(?:\.get)?|os\.getenv|getenv|environ(?:\.get)?)"
+_CALL = re.compile(
+    rf"(?:{_ENV_CALLEE}[ ]?(?:\({_ENV_ARGS}\)|\[{_ENV_ARGS}\])"
+    rf"|{_DOTTED}[ ]?(?:\({_ARGS}\)|\[{_ARGS}\]))[,):]?"
+)
+_LITERAL_TOKEN = re.compile(r"(?<![A-Za-z0-9_])[A-Z_]*[0-9][A-Z0-9_]*(?![A-Za-z0-9_])")
 _VALUE_LOOK = 256  # how much of a value is looked at: keeps a long line linear
 
 # Programs that print the environment: printenv always; env with no program
@@ -157,9 +204,16 @@ _SECRET_VARIABLE = re.compile(
 )
 _MARKERS = re.compile(
     r"os\.environ|dotenv_values|dotenv\s+list|compose\s+config|auth\s+token|get\s+secret"
-    r"|export-credentials|gh/hosts\.yml|secrets\.ya?ml",
+    r"|export-credentials|gh/hosts\.yml|secrets\.ya?ml|/proc/\S*/environ|\bop\s+read\b"
+    r"|find-(?:generic|internet)-password|\bsops\s+(?:-d|--decrypt)\b|credential\s+fill"
+    r"|print-access-token|get-access-token|get-session-token|heroku\s+config",
     re.IGNORECASE,
 )
+# An inline script (python -c, ruby -e, node -e...) that names a secret
+# variable in quotes (os.getenv("OPENAI_API_KEY")) or reads Ruby's ENV.
+_SCRIPT_FLAG = re.compile(r"(?:^|\s)-[ce](?:\s|['\"])")
+_QUOTED_UPPER = re.compile(r"[\"']([A-Z][A-Z0-9_]*)[\"']")
+_RUBY_ENV = re.compile(r"(?<![A-Za-z0-9_])ENV(?![A-Za-z0-9_])")
 _GLOB = re.compile(r"[*?\[]")
 # Names a glob is tried against: one of each kind of credential file.
 _SAMPLES = (
@@ -192,6 +246,11 @@ def prints_secrets(command: str) -> bool:
     however long.
     """
     if _MARKERS.search(command):
+        return True
+    if _SCRIPT_FLAG.search(command) and (
+        _RUBY_ENV.search(command)
+        or any(_SECRET_VARIABLE.search(name) for name in _QUOTED_UPPER.findall(command))
+    ):
         return True
     if any(_SECRET_VARIABLE.search(name) for name in _VARIABLE.findall(command)):
         return True
@@ -233,27 +292,31 @@ def _keeps_value(name: str, separator: str, after: str) -> bool:
     """True if the value after a secret name is code, not a secret: kept.
 
     Fails closed. An UPPER_CASE (environment-style) name always loses its
-    value. Otherwise the value stays only when it is a comparison or a
-    comment (``==``, ``:=``, ``//``), a number or a type for a count of
+    value. A ``//`` comment stays. In ``==`` and ``:=`` the value is what
+    follows (``password == "admin123"`` loses ``"admin123"``). Otherwise
+    the value stays only when it is a number or a type for a count of
     tokens (``max_tokens=1024``, ``num_tokens: int``), the name itself
-    (``self.api_key = api_key``), or a call or subscript
+    (``self.api_key = api_key``), or a call or subscript of plain names
     (``get_password()``, ``os.environ["X"]``). Anything else, short values
     and other bare identifiers included, is redacted.
     """
     if _ENV_STYLE.fullmatch(name):
         return False
-    if after.startswith("=") or after.lstrip().startswith("//"):
+    if after.lstrip().startswith("//"):
         return True
+    if after.startswith("="):  # == compares, := assigns: judge what follows
+        after = after[1:]
     value = after.strip()
     parts = _parts(name)
     if parts and parts[-1] == "tokens" and all(p in _COUNT_PARTS for p in parts[:-1]):
         annotation = value.split("=", 1)[0].strip()
-        if _NUMBER.fullmatch(value) or (separator == ":" and _ANNOTATION.fullmatch(annotation)):
+        number = value.split("#", 1)[0].strip()
+        if _NUMBER.fullmatch(number) or (separator == ":" and _ANNOTATION.fullmatch(annotation)):
             return True
     same = _IDENTIFIER.fullmatch(value)
     if same and same[1] in (name, name.rsplit(".", 1)[-1]):
         return True
-    return bool(_CALL.fullmatch(value))
+    return bool(_CALL.fullmatch(value)) and not _LITERAL_TOKEN.search(value)
 
 
 def _next_line_value(text: str, line_start: int, end: int) -> tuple[int, int] | None:
@@ -261,7 +324,7 @@ def _next_line_value(text: str, line_start: int, end: int) -> tuple[int, int] | 
     the next line, as (start, end) of the text to replace; else None."""
     if end >= len(text):
         return None
-    indent = len(text[line_start:]) - len(text[line_start:].lstrip(" \t"))
+    indent = _INDENT.match(text, line_start).end() - line_start  # type: ignore[union-attr]
     start = end + 1
     stop = text.find("\n", start)
     stop = len(text) if stop < 0 else stop
@@ -285,6 +348,8 @@ def redact(text: str) -> str:
     text = _TOKENS.sub(REDACTED, text)
     text = _AUTH.sub(lambda m: m[1] + REDACTED, text)
     text = _USERINFO.sub(lambda m: m[1] + REDACTED + m[2], text)
+    for form in _FORMS:
+        text = form.sub(lambda m: m[1] + REDACTED + (m.groupdict().get("tail") or ""), text)
     out: list[str] = []
     done = 0  # text before this is already in ``out``
     for match in _NAME.finditer(text):
@@ -294,7 +359,8 @@ def redact(text: str) -> str:
         end = len(text) if end < 0 else end
         after = text[match.end() : min(end, match.end() + _VALUE_LOOK)]
         if after.strip():
-            if not _keeps_value(match[1], match[2], after):
+            too_long = end - match.end() > _VALUE_LOOK  # can't judge it all: redact
+            if too_long or not _keeps_value(match[1], match[2], after):
                 out += [text[done : match.end()], REDACTED]
                 done = end
         elif match[2] == ":":
