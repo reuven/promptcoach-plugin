@@ -236,7 +236,9 @@ def test_worktree_file_naming_an_unregistered_worktree_gets_no_diff(
 def test_unreadable_worktree_link_is_not_trusted(tmp_path: Path) -> None:
     common = tmp_path / "main" / ".git"
     (common / "worktrees" / "wt").mkdir(parents=True)  # no "gitdir" file in it
-    assert not gitdiff._own_git_dir(tmp_path / "wt", common / "worktrees" / "wt", common)
+    assert not gitdiff._own_git_dir(
+        tmp_path / "wt", common / "worktrees" / "wt", common, gitdiff.Deadline(10)
+    )
 
 
 # --- mutation survivors: diff drivers, hooks ------------------------------------------
@@ -468,6 +470,13 @@ def test_git_dir_walk_edge_cases(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, repo: Path
 ) -> None:
     assert not gitdiff._no_symlinks(tmp_path / "missing", gitdiff.Deadline(10))
+    locked = tmp_path / "locked" / ".git"
+    (locked / "objects").mkdir(parents=True)
+    (locked / "objects").chmod(0o000)
+    try:
+        assert not gitdiff._no_symlinks(locked, gitdiff.Deadline(10))  # unreadable
+    finally:
+        (locked / "objects").chmod(0o755)
     assert gitdiff._no_symlinks(repo / ".git", gitdiff.Deadline(10))
     assert not gitdiff._no_symlinks(repo / ".git", gitdiff.Deadline(-1))  # no time left
     monkeypatch.setattr(gitdiff, "_GIT_DIR_WALK_S", 0.0)

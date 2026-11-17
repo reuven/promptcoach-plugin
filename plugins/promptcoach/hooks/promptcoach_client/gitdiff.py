@@ -185,45 +185,39 @@ def _same(a: Path, b: Path) -> bool:
         return False
 
 
-# Git-dir entries through which refs or objects could come from elsewhere.
-_GIT_DIR_ENTRIES = (
-    "HEAD",
-    "packed-refs",
-    "commondir",
-    "refs",
-    "objects",
-    "objects/info",
-    "objects/info/alternates",
-    "objects/pack",
-)
-_MAX_REF_ENTRIES = 10_000  # more loose refs than this: don't trust, don't scan
+# The git dir is walked whole before any diff: bounded, failing closed.
+_MAX_GIT_DIR_ENTRIES = 100_000
+_GIT_DIR_WALK_S = 0.3
 
 
-def _entries_stay_inside(git_dir: Path) -> bool:
-    """True if no entry that supplies refs or objects is a symlink or lies
-    outside ``git_dir``: HEAD, packed-refs, commondir, refs (all of it),
-    objects and its fan-out directories, info and alternates.
+def _no_symlinks(git_dir: Path, deadline: Deadline) -> bool:
+    """True if nothing anywhere in ``git_dir`` is a symlink (an lstat walk
+    that never follows one), within 100,000 entries and 0.3 s of the hook's
+    budget; False when it can't tell (too big, too slow, unreadable).
 
-    Why: ``.git/objects`` (or each ``objects/ab``) and ``.git/refs`` can be
-    symlinks into another of the person's repos; resolving paths alone
-    would then pass, and that repo's files would be diffed.
+    Why one walk and not a list of entries: refs, objects (and each fan-out
+    directory or pack), the index, info/grafts, shallow... any of them can
+    be a symlink into another of the person's repos, and git would serve
+    that repo's history as this one's. Hardlinked files are out of scope:
+    objects are content-addressed, so a hardlink can only supply an object
+    the attacker already knows the contents of.
     """
+    stop = min(time.monotonic() + _GIT_DIR_WALK_S, deadline.end)
+    seen = 0
     try:
-        git_dir.resolve(strict=True)  # it must exist (a loop or a missing dir: refuse)
-        paths = [git_dir / entry for entry in _GIT_DIR_ENTRIES]
-        objects = git_dir / "objects"
-        if objects.is_dir() and not objects.is_symlink():
-            paths += [Path(e.path) for e in os.scandir(objects)]
-        refs = git_dir / "refs"
-        if refs.is_dir() and not refs.is_symlink():
-            for top, dirs, files in os.walk(refs):  # symlinked dirs are listed, not entered
-                paths += [Path(top, name) for name in (*dirs, *files)]
-                if len(paths) > _MAX_REF_ENTRIES:
-                    return False
-        # Every directory on the way to a listed entry is listed before it,
-        # so with no symlink among them, each resolves inside ``git_dir``.
-        if any(path.is_symlink() for path in paths):
+        if git_dir.is_symlink() or not git_dir.is_dir():
             return False
+        pending = [str(git_dir)]
+        while pending:
+            with os.scandir(pending.pop()) as entries:
+                for entry in entries:
+                    seen += 1
+                    if seen > _MAX_GIT_DIR_ENTRIES or time.monotonic() > stop:
+                        return False
+                    if entry.is_symlink():
+                        return False
+                    if entry.is_dir(follow_symlinks=False):
+                        pending.append(entry.path)
     except OSError:
         return False
     return True
@@ -243,7 +237,7 @@ def _borrows(git_dir: Path) -> bool:
     return bool(alternates.strip())
 
 
-def _own_git_dir(root: Path, git_dir: Path, common_dir: Path) -> bool:
+def _own_git_dir(root: Path, git_dir: Path, common_dir: Path, deadline: Deadline) -> bool:
     """True if ``git_dir`` is the work tree's own: ``<root>/.git`` holding its
     own refs and objects, or a linked worktree's directory whose main repo
     lists ``<root>`` as that worktree.
@@ -251,19 +245,19 @@ def _own_git_dir(root: Path, git_dir: Path, common_dir: Path) -> bool:
     Why: a ``.git`` file (``gitdir: /elsewhere``), ``core.worktree``, or a
     ``.git`` directory with a ``commondir`` file or ``alternates`` in an
     unpacked archive, or symlinks as or inside the git dir (see
-    ``_entries_stay_inside``), could point git at another of the person's repos, and
+    ``_no_symlinks``), could point git at another of the person's repos, and
     its committed files would then go out as this turn's diff.
     """
     if (root / ".git").is_symlink():
         return False
     if _same(git_dir, root / ".git"):
         return (
-            _same(common_dir, git_dir) and not _borrows(git_dir) and _entries_stay_inside(git_dir)
+            _same(common_dir, git_dir) and not _borrows(git_dir) and _no_symlinks(git_dir, deadline)
         )
     worktrees = common_dir / "worktrees"
     if not _same(git_dir.parent, worktrees) or _borrows(common_dir):
         return False
-    if not (_entries_stay_inside(git_dir) and _entries_stay_inside(common_dir)):
+    if not (_no_symlinks(git_dir, deadline) and _no_symlinks(common_dir, deadline)):
         return False
     try:
         listed = (git_dir / "gitdir").read_text(encoding="utf-8").strip()
@@ -291,7 +285,7 @@ def repo_root(cwd: Path, deadline: Deadline | None = None) -> Path | None:
     if len(lines) != 3 or not all(lines):
         return None
     root, git_dir, common_dir = (Path(line) for line in lines)
-    return root if _own_git_dir(root, git_dir, common_dir) else None
+    return root if _own_git_dir(root, git_dir, common_dir, deadline) else None
 
 
 def _repo_defines_filters(root: Path, timeout: float = GIT_TIMEOUT_S) -> bool:
