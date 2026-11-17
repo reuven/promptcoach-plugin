@@ -50,8 +50,8 @@ When Claude finishes a turn, it sends:
 
 - the diff of what changed during that turn only (a snapshot is taken before
   the turn, so earlier changes and your own edits aren't included);
-- the shell commands Claude ran, their exit codes and the last 4,000
-  characters of their output;
+- the shell commands Claude ran (filtered for secrets, see below), their
+  exit codes and the last 4,000 characters of their output;
 - Claude's final reply.
 
 Credential files (`.env` files, `.envrc`, private keys, `*.pem`,
@@ -62,14 +62,21 @@ the server refuses them too.
 Secrets can still turn up elsewhere: in a command's output, in Claude's
 reply, or pasted into a source file. The plugin filters the common ones
 before anything leaves your machine. A command that reads a credential file
-(`cat .env`, `source .env`, `< .env`) or prints the environment (`env`,
-`printenv`, `export -p`) has its output dropped, and well-known token shapes
-(`sk-...`, `ghp_...`, `AKIA...`, private-key blocks and the like) and the
-values of lines such as `DB_PASSWORD=...` or `api_key: ...` are replaced with
-`[REDACTED]` in output, replies and diffs. The server scrubs secrets again
-from everything it stores. This is a filter for the usual cases, not a
-guarantee: a secret in an unusual shape can get through, so keep secrets out
-of code and output, or use prompt-only mode.
+(`cat .env`, `source .env`, `< .env`, or a pattern such as `.env*` that could
+match one), expands a secret-named variable (`echo $OPENAI_API_KEY`), prints
+the environment (`env`, `printenv`, `export -p`, `os.environ`) or asks a tool
+for a secret (`gh auth token`, `kubectl get secret`, `docker compose config`)
+has its output dropped. Well-known token shapes (`sk-...`, `ghp_...`,
+`AKIA...`, `sk_live_...`, `hf_...`, JWTs, `Authorization:` headers, the
+password in `https://user:password@host`, private-key blocks and the like)
+and literal values of lines such as `DB_PASSWORD=...` or
+`api_key: "..."` are replaced with `[REDACTED]` in commands, output, replies
+and diffs; code such as `max_tokens=1024` or `self.api_key = api_key` is left
+alone. The server scrubs secrets again from everything it stores. This is a
+filter for the usual cases, not a guarantee: a secret in an unusual shape, or
+a command that hides what it reads (`eval`, a file name built from pieces or
+held in a variable), can get through, so keep secrets out of code and
+output, or use prompt-only mode.
 
 The snapshots are made with a private git index file, so your own index,
 staging area and stash are never touched. Making one does write git objects
@@ -82,8 +89,20 @@ never its files. A repository whose own config defines a clean/smudge filter
 gets no diff at all, and so does one whose `.git` points somewhere else (a
 `gitdir:` file, `core.worktree`, a `commondir` file, `alternates`, or a
 `.git` that is, or contains, a symlink anywhere), unless it is a linked
-worktree that its main repository lists. A `.git` directory too big to check
-quickly (over 100,000 entries) gets no diff either. Files are read only where they are: a `CLAUDE.md` or `.claude/` that is
+worktree that its main repository lists. (Symlinks in `.git/hooks` are
+fine: the plugin never runs hooks.) A `.git` that holds a FIFO or other
+special file, or is too big to check quickly (over 100,000 entries), gets no
+diff either. The diff covers only your project's own directory: if the
+project sits inside a bigger repository (a monorepo, say), the rest of that
+repository is left out, and a repository whose top is your home directory, or
+above it (a dotfiles repository), gets no diff at all.
+
+These checks protect against a repository that was handed to you, not
+against a program already running as you: something that can change `.git`
+between the plugin's check and git's read could already read your files
+directly.
+
+Files are read only where they are: a `CLAUDE.md` or `.claude/` that is
 a symlink out of the project (or out of your home directory, for the global
 files), or to a credential file, is treated as absent.
 
@@ -121,7 +140,10 @@ Each hook has one time budget for all its work: 2.6 seconds before a prompt
 and 13.5 seconds at the end of a turn, inside Claude Code's own limits. A
 slow git or a slow server means less coaching for that turn, never a stuck
 session. The server can keep a prompt from Claude only when the prompt is a
-coach command such as `coach, quieter`.
+coach command such as `coach, quieter`: the plugin checks that itself, and
+if it and the server disagree about a prompt, the prompt goes to Claude (the
+plugin fails open). If Claude Code stops a hook at its limit, any git the
+hook started is stopped with it.
 
 ## License
 
