@@ -323,3 +323,11 @@ def test_project_json_py_never_runs(tmp_path: Path, data_dir: Path) -> None:
     )
 
     assert not marker.exists()
+
+
+def test_adapter_never_blocks_at_the_end_of_a_turn(
+    server: StubServer, env: dict[str, str], project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Even if the core returned a block, Stop output is only a message."""
+    monkeypatch.setattr(core, "after", lambda *args: core.Reply("x", True, False))
+    assert json.loads(run_hook("after", stop_payload(project), env)) == {"systemMessage": "x"}

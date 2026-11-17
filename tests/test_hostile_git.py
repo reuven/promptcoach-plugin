@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -565,3 +567,35 @@ def test_git_dir_over_the_cap_means_no_diff(
     _turn(repo, env, repo / "app.py", "print('v2')\n")
 
     assert _diffs(server) == [None, None]
+
+
+# --- mutation survivors of this round: process group, no spawn without time ---------------
+
+
+def test_a_stopped_git_takes_its_children_with_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A program git started (an ssh, a filter) holds git's stdout open."""
+    pid_file = tmp_path / "child.pid"
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    (fake / "git").write_text(f"#!/bin/sh\nsleep 30 &\necho $! > {pid_file}\nsleep 30\n")
+    (fake / "git").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake}{os.pathsep}{os.environ['PATH']}")
+
+    started = time.monotonic()
+    assert gitdiff.run_git(["status"], tmp_path, timeout=1.5) is None
+    assert time.monotonic() - started < 4.0
+    child = int(pid_file.read_text())
+    time.sleep(0.2)
+    with pytest.raises(ProcessLookupError):
+        os.kill(child, 0)
+
+
+def test_no_git_starts_without_time_left(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def no_spawn(*args: object, **kwargs: object) -> None:
+        raise AssertionError("git started with no time left")
+
+    monkeypatch.setattr(subprocess, "Popen", no_spawn)
+    assert gitdiff.run_git(["status"], tmp_path, timeout=0.0) is None
+    assert gitdiff.run_git(["status"], tmp_path, timeout=0.01) is None
