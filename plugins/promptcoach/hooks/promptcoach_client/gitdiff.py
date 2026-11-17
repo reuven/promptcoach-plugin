@@ -278,8 +278,8 @@ def _no_symlinks(git_dir: Path, deadline: Deadline) -> bool:
                         return False
                     if entry.is_dir(follow_symlinks=False):
                         pending.append(entry.path)
-                    elif entry.is_symlink() or not entry.is_file(follow_symlinks=False):
-                        return False
+                    elif not entry.is_file(follow_symlinks=False):
+                        return False  # a symlink, FIFO, socket or device
     except OSError:
         return False
     return True

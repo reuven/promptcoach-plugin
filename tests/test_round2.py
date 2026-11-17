@@ -11,6 +11,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -94,8 +95,23 @@ def test_read_control(tmp_path: Path) -> None:
 
     assert gitdiff._read_control(tmp_path / "ok") == (True, "../..\n")
     assert gitdiff._read_control(tmp_path / "missing") == (True, "")
-    for bad in ("fifo", "big", "link", "dir"):
+    for bad in ("big", "link", "dir"):
         assert gitdiff._read_control(tmp_path / bad) == (False, ""), bad
+
+
+def test_read_control_never_blocks_on_a_fifo(tmp_path: Path) -> None:
+    """Fails in 2 s, not never: opening a FIFO without O_NONBLOCK blocks forever."""
+    os.mkfifo(tmp_path / "fifo")
+    results: list[tuple[bool, str]] = []
+    reader = threading.Thread(
+        target=lambda: results.append(gitdiff._read_control(tmp_path / "fifo")), daemon=True
+    )
+    reader.start()
+    reader.join(2)
+    if reader.is_alive():  # unblock the stuck open so the thread can end
+        with open(tmp_path / "fifo", "w"):
+            pass
+    assert results == [(False, "")]
 
 
 def test_any_special_file_in_the_git_dir_means_no_diff(

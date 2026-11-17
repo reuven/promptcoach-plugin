@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import signal
 import subprocess
 import threading
 from collections.abc import Iterator
@@ -15,6 +16,28 @@ from typing import Any
 import pytest
 
 from promptcoach_client.claude_code import main
+
+# No test may run longer than this. A test that blocks (a FIFO opened without
+# O_NONBLOCK, a pipe nobody closes) fails with a TimeoutError instead of
+# hanging the run and holding a test slot. SIGALRM interrupts a blocking
+# system call in the main thread; no plugin needed, and it works on 3.9.
+TEST_TIMEOUT_S = 120
+
+
+def _too_slow(signum: int, frame: object) -> None:
+    raise TimeoutError(f"test ran longer than {TEST_TIMEOUT_S} s")
+
+
+@pytest.fixture(autouse=True)
+def _per_test_timeout() -> Iterator[None]:
+    previous = signal.signal(signal.SIGALRM, _too_slow)
+    signal.alarm(TEST_TIMEOUT_S)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
 
 TOKEN = "pc_" + "t" * 43  # the server's token shape; a dummy
 SILENT = {"message": None, "block_prompt": False, "prompt_only": False}
