@@ -69,10 +69,12 @@ for a secret (`gh auth token`, `kubectl get secret`, `docker compose config`)
 has its output dropped. Well-known token shapes (`sk-...`, `ghp_...`,
 `AKIA...`, `sk_live_...`, `hf_...`, JWTs, `Authorization:` headers, the
 password in `https://user:password@host`, private-key blocks and the like)
-and literal values of lines such as `DB_PASSWORD=...` or
-`api_key: "..."` are replaced with `[REDACTED]` in commands, output, replies
-and diffs; code such as `max_tokens=1024` or `self.api_key = api_key` is left
-alone. The server scrubs secrets again from everything it stores. This is a
+and the values of lines such as `DB_PASSWORD=...` or `api_key: ...` are
+replaced with `[REDACTED]` in commands, output, replies and diffs. Only a few
+plain code forms are left alone: a token count (`max_tokens=1024`), a name
+assigned to itself (`self.api_key = api_key`) and a call or lookup
+(`password = get_password()`, `os.environ["TOKEN"]`); an `UPPER_CASE` name
+always loses its value. The server scrubs secrets again from everything it stores. This is a
 filter for the usual cases, not a guarantee: a secret in an unusual shape, or
 a command that hides what it reads (`eval`, a file name built from pieces or
 held in a variable), can get through, so keep secrets out of code and

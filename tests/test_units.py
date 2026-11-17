@@ -540,5 +540,7 @@ def test_run_git_that_hangs_after_closing_output(
     fake.chmod(0o755)
     monkeypatch.setenv("PATH", str(fake.parent))
     started = time.monotonic()
-    assert gitdiff.run_git(["status"], tmp_path, timeout=0.5) is None
-    assert time.monotonic() - started < 2
+    # 1.5 s: time for the shell to close its output even on a loaded machine,
+    # so the wait (not the read) is what times out.
+    assert gitdiff.run_git(["status"], tmp_path, timeout=1.5) is None
+    assert time.monotonic() - started < 4
