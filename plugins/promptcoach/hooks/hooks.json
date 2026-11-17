@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {"hooks": [{"type": "command", "command": "python3", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/coach_hook.py", "before"], "timeout": 3}]}
+    ],
+    "PostToolUse": [
+      {"matcher": "Bash", "hooks": [{"type": "command", "command": "python3", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/coach_hook.py", "record"], "timeout": 2}]}
+    ],
+    "PostToolUseFailure": [
+      {"matcher": "Bash", "hooks": [{"type": "command", "command": "python3", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/coach_hook.py", "record"], "timeout": 2}]}
+    ],
+    "Stop": [
+      {"hooks": [{"type": "command", "command": "python3", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/coach_hook.py", "after"], "timeout": 15}]}
+    ]
+  }
+}

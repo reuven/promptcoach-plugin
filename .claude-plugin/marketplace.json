@@ -1,0 +1,12 @@
+{
+  "name": "promptcoach",
+  "owner": {"name": "Reuven Lerner"},
+  "description": "Prompt coach for LernerPython subscribers",
+  "plugins": [
+    {
+      "name": "promptcoach",
+      "source": "./plugins/promptcoach",
+      "description": "Coaching on your prompts and on what the agent did, shown to you, never to Claude"
+    }
+  ]
+}
