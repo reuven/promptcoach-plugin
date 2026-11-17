@@ -58,7 +58,7 @@ def test_block_reply_emits_decision_block(
         "prompt_only": True,
     }
 
-    out = run_hook("before", prompt_payload(project, "coach, teach"), env)
+    out = run_hook("before", prompt_payload(project, "coach, louder"), env)
 
     assert json.loads(out) == {"decision": "block", "reason": "Coach level set to teach."}
 

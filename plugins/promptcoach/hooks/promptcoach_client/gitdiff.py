@@ -8,17 +8,27 @@ so only changed files are hashed. At the end of the turn it takes a second
 snapshot the same way and diffs the two trees. Credential files are left out
 of both snapshots and of the diff with ``:(exclude)`` pathspecs.
 
-Every git call has a timeout and a size cap, runs with ``GIT_OPTIONAL_LOCKS=0``
-so a ``git diff`` never rewrites the real index's stat cache, and ignores any
-``GIT_*`` variables the agent's environment carries.
+Every git call has a timeout (within the hook's one deadline) and a size
+cap, runs with ``GIT_OPTIONAL_LOCKS=0`` so a ``git diff`` never rewrites the
+real index's stat cache, never fetches (a partial clone's missing objects
+stay missing), and ignores any ``GIT_*`` variables the agent's environment
+carries. A repo whose ``.git`` points somewhere else (a ``gitdir:`` file or
+``core.worktree``) gets no diff, except a linked worktree its main repo
+lists. Submodules show as one commit line, never their content.
+
+The snapshot writes loose objects (blobs and trees) into the repo's own
+``.git/objects``; nothing references them, so ``git gc`` removes them.
 """
 
 from __future__ import annotations
 
 import contextlib
+import math
 import os
 import shutil
+import signal
 import subprocess
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -31,12 +41,20 @@ GIT_TIMEOUT_S = 3.0
 TRUNCATED = "\n[promptcoach: diff truncated]\n"
 _DIFF_BYTES = MAX_DIFF_CHARS * 4  # UTF-8 never needs more for the cap
 _SMALL_BYTES = 1_000_000  # rev-parse, write-tree, ls-files
-# Overrides for repo-local settings that would make git run a program:
-# an fsmonitor hook, hooks, automatic maintenance. Filters are handled by
+_MIN_STEP_S = 0.05  # less time than this left: a git call can't finish
+_NO_DEADLINE_S = 60.0  # for callers without a hook budget (tests, tools)
+# Overrides for repo-local settings that would make git run a program or go
+# online: an fsmonitor hook, hooks, automatic maintenance, any transport (a
+# partial clone fetches missing objects through core.sshCommand), a
+# submodule diff format that shows content. Filters are handled by
 # ``_repo_defines_filters`` and diff drivers by --no-ext-diff/--no-textconv.
 _SAFE_CONFIG = (
     "-c",
     "core.fsmonitor=false",
+    "-c",
+    "protocol.allow=never",
+    "-c",
+    "diff.submodule=short",
     "-c",
     f"core.hooksPath={os.devnull}",
     "-c",
@@ -50,22 +68,31 @@ _DIFF_FLAGS = (
     "--no-color",
     "--no-ext-diff",
     "--no-textconv",
+    "--submodule=short",
+    "--ignore-submodules=dirty",
     "--src-prefix=a/",
     "--dst-prefix=b/",
 )
 
 
 class Deadline:
-    """Stub."""
+    """The end of a hook's time budget, on the monotonic clock.
+
+    One per hook run: every git call and the request get what is left of
+    it (capped at their own limit), and a step that would start after it
+    is skipped, so the hook as a whole ends on time.
+    """
 
     def __init__(self, seconds: float) -> None:
         self.end = time.monotonic() + seconds
 
-    def left(self, cap: float = float("inf")) -> float:
+    def left(self, cap: float = math.inf) -> float:
+        """Seconds left, at most ``cap``; never negative."""
         return max(min(cap, self.end - time.monotonic()), 0.0)
 
     def spent(self) -> bool:
-        return self.left() <= 0.0
+        """True once (almost) nothing is left: don't start anything new."""
+        return self.left() < _MIN_STEP_S
 
 
 @dataclass(frozen=True)
@@ -78,7 +105,13 @@ class GitOutput:
 
 def _env(index_file: Path | None = None) -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    env.update(GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0", GIT_CONFIG_NOSYSTEM="1", LC_ALL="C")
+    env.update(
+        GIT_OPTIONAL_LOCKS="0",
+        GIT_NO_LAZY_FETCH="1",
+        GIT_TERMINAL_PROMPT="0",
+        GIT_CONFIG_NOSYSTEM="1",
+        LC_ALL="C",
+    )
     if index_file is not None:
         env["GIT_INDEX_FILE"] = str(index_file)
     return env
@@ -95,8 +128,12 @@ def run_git(
     """Run ``git`` in ``cwd``; None on any failure, non-zero exit or timeout.
 
     Output beyond ``limit`` bytes isn't read: git is stopped and the result is
-    marked truncated, so a huge diff can't fill memory.
+    marked truncated, so a huge diff can't fill memory. Git runs in its own
+    process group, and a stop kills the whole group: a program git started
+    can't outlive it or hold its output open.
     """
+    if timeout < _MIN_STEP_S:
+        return None
     try:
         # git from PATH, as the agent runs it; the arguments are ours alone.
         proc = subprocess.Popen(  # noqa: S603
@@ -106,6 +143,7 @@ def run_git(
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             env=_env(index_file),
+            start_new_session=True,
         )
     except OSError:  # git missing, cwd gone
         return None
@@ -119,11 +157,11 @@ def run_git(
     truncated = bool(chunks) and len(chunks[0]) > limit
     try:
         if reader.is_alive() or truncated:
-            proc.kill()
-            reader.join(1.0)  # the pipe closes with git, so this returns at once
+            _kill(proc)
+            reader.join(1.0)  # the pipe closes with the group, so this returns at once
         code = proc.wait(max(deadline - time.monotonic(), 0.1))
     except subprocess.TimeoutExpired:  # git closed its output but kept running
-        proc.kill()
+        _kill(proc)
         proc.wait()
         return None
     finally:
@@ -133,10 +171,60 @@ def run_git(
     return GitOutput(chunks[0][:limit].decode("utf-8", errors="replace"), truncated)
 
 
-def repo_root(cwd: Path, timeout: float = GIT_TIMEOUT_S) -> Path | None:
-    """The top of the work tree containing ``cwd``, or None outside a repo."""
-    out = run_git(["rev-parse", "--show-toplevel"], cwd, timeout=timeout)
-    return Path(out.text.strip()) if out and out.text.strip() else None
+def _kill(proc: subprocess.Popen[bytes]) -> None:
+    """Kill git and everything it started (its process group)."""
+    with contextlib.suppress(OSError):
+        os.killpg(proc.pid, signal.SIGKILL)
+    proc.kill()
+
+
+def _same(a: Path, b: Path) -> bool:
+    try:
+        return a.resolve(strict=True) == b.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return False
+
+
+def _own_git_dir(root: Path, git_dir: Path, common_dir: Path) -> bool:
+    """True if ``git_dir`` is the work tree's own: ``<root>/.git``, or a linked
+    worktree's directory whose main repo lists ``<root>`` as that worktree.
+
+    Why: a ``.git`` file (``gitdir: /elsewhere``) or ``core.worktree`` in an
+    unpacked archive could point git at another of the person's repos, and
+    its committed files would then go out as this turn's diff.
+    """
+    if _same(git_dir, root / ".git"):
+        return True
+    worktrees = common_dir / "worktrees"
+    if not _same(git_dir.parent, worktrees):
+        return False
+    try:
+        listed = (git_dir / "gitdir").read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return False
+    return _same(Path(listed), root / ".git")
+
+
+def repo_root(cwd: Path, deadline: Deadline | None = None) -> Path | None:
+    """The top of the work tree containing ``cwd``; None outside a repo, or
+    when the repo's git directory isn't its own (see ``_own_git_dir``)."""
+    deadline = deadline or Deadline(_NO_DEADLINE_S)
+    out = run_git(
+        [
+            "rev-parse",
+            "--show-toplevel",
+            "--absolute-git-dir",
+            "--path-format=absolute",
+            "--git-common-dir",
+        ],
+        cwd,
+        timeout=deadline.left(GIT_TIMEOUT_S),
+    )
+    lines = out.text.splitlines() if out else []
+    if len(lines) != 3 or not all(lines):
+        return None
+    root, git_dir, common_dir = (Path(line) for line in lines)
+    return root if _own_git_dir(root, git_dir, common_dir) else None
 
 
 def _repo_defines_filters(root: Path, timeout: float = GIT_TIMEOUT_S) -> bool:
@@ -161,38 +249,53 @@ def _scope() -> list[str]:
     return ["--", ".", *exclude_pathspecs()]
 
 
-def snapshot(cwd: Path, index_file: Path, timeout: float = GIT_TIMEOUT_S) -> str | None:
+def snapshot(cwd: Path, data_dir: Path, deadline: Deadline) -> str | None:
     """Record the work tree (minus credential files) as a tree; its sha, or None.
 
-    The real index is only copied, never written. ``timeout`` is the budget
-    for all the git calls together. The private index is deleted afterwards.
+    The real index is only copied, never written. The private index is a
+    fresh file in ``data_dir`` each time, deleted afterwards with any lock
+    git left on it: a git killed mid-``add`` can't block the next snapshot.
     """
-    deadline = time.monotonic() + timeout
-
-    def left() -> float:
-        return max(deadline - time.monotonic(), 0.05)
-
+    index_file: Path | None = None
     try:
-        root = repo_root(cwd, left())
-        if root is None or _repo_defines_filters(root, left()):
+        root = repo_root(cwd, deadline)
+        if root is None or _repo_defines_filters(root, deadline.left(GIT_TIMEOUT_S)):
             return None
-        real = run_git(["rev-parse", "--git-path", "index"], root, timeout=left())
+        real = run_git(
+            ["rev-parse", "--git-path", "index"], root, timeout=deadline.left(GIT_TIMEOUT_S)
+        )
         if real is None:
             return None
         real_index = root / real.text.strip()
-        index_file.parent.mkdir(parents=True, exist_ok=True)
-        index_file.unlink(missing_ok=True)
+        data_dir.mkdir(parents=True, exist_ok=True)
+        fd, name = tempfile.mkstemp(dir=data_dir, prefix="idx-")
+        os.close(fd)
+        index_file = Path(name)
         if real_index.is_file():
-            shutil.copyfile(real_index, index_file)
-        if run_git(["add", "-A", *_scope()], root, timeout=left(), index_file=index_file) is None:
+            # copy2 keeps the index's mtime, which git's racy-clean check
+            # compares file mtimes with; a newer copy would hide some edits.
+            shutil.copy2(real_index, index_file)
+        else:
+            index_file.unlink()  # git wants no index file rather than an empty one
+        added = run_git(
+            ["add", "-A", *_scope()],
+            root,
+            timeout=deadline.left(GIT_TIMEOUT_S),
+            index_file=index_file,
+        )
+        if added is None:
             return None
-        tree = run_git(["write-tree"], root, timeout=left(), index_file=index_file)
+        tree = run_git(
+            ["write-tree"], root, timeout=deadline.left(GIT_TIMEOUT_S), index_file=index_file
+        )
         return tree.text.strip() if tree and tree.text.strip() else None
     except OSError:
         return None
     finally:
-        with contextlib.suppress(OSError):
-            index_file.unlink(missing_ok=True)
+        if index_file is not None:
+            for leftover in (index_file, Path(f"{index_file}.lock")):
+                with contextlib.suppress(OSError):
+                    leftover.unlink(missing_ok=True)
 
 
 def cap_diff(text: str, truncated: bool = False) -> str:
@@ -202,31 +305,44 @@ def cap_diff(text: str, truncated: bool = False) -> str:
     return text[: MAX_DIFF_CHARS - len(TRUNCATED)] + TRUNCATED
 
 
-def _diff(args: list[str], root: Path) -> str | None:
-    out = run_git([*_DIFF_FLAGS, *args, *_scope()], root, limit=_DIFF_BYTES)
+def _diff(args: list[str], root: Path, deadline: Deadline) -> str | None:
+    out = run_git(
+        [*_DIFF_FLAGS, *args, *_scope()],
+        root,
+        timeout=deadline.left(GIT_TIMEOUT_S),
+        limit=_DIFF_BYTES,
+    )
     return None if out is None else cap_diff(out.text, out.truncated)
 
 
-def diff_trees(cwd: Path, before: str, after: str) -> str | None:
+def diff_trees(cwd: Path, before: str, after: str, deadline: Deadline) -> str | None:
     """The diff between two snapshots, credential files excluded."""
-    root = repo_root(cwd)
-    return None if root is None else _diff([before, after], root)
+    root = repo_root(cwd, deadline)
+    return None if root is None else _diff([before, after], root, deadline)
 
 
-def collect_diff(cwd: Path) -> str | None:
+def collect_diff(cwd: Path, deadline: Deadline | None = None) -> str | None:
     """The fallback diff when there is no snapshot from the start of the turn.
 
     ``git diff HEAD``; in a repo with no commits yet, the staged diff with a
     list of untracked files (credential files left out) in front of it.
     None when ``cwd`` isn't in a repo or git is missing.
     """
-    root = repo_root(cwd)
-    if root is None or _repo_defines_filters(root):
+    deadline = deadline or Deadline(_NO_DEADLINE_S)
+    root = repo_root(cwd, deadline)
+    if root is None or _repo_defines_filters(root, deadline.left(GIT_TIMEOUT_S)):
         return None
-    if run_git(["rev-parse", "--verify", "-q", "HEAD"], root) is not None:
-        return _diff(["HEAD"], root)
-    staged = _diff(["--cached"], root)
-    listed = run_git(["ls-files", "--others", "--exclude-standard", "-z"], root)
+    head = run_git(
+        ["rev-parse", "--verify", "-q", "HEAD"], root, timeout=deadline.left(GIT_TIMEOUT_S)
+    )
+    if head is not None:
+        return _diff(["HEAD"], root, deadline)
+    staged = _diff(["--cached"], root, deadline)
+    listed = run_git(
+        ["ls-files", "--others", "--exclude-standard", "-z"],
+        root,
+        timeout=deadline.left(GIT_TIMEOUT_S),
+    )
     untracked = [
         p for p in (listed.text.split("\0") if listed else []) if p and not is_forbidden_path(p)
     ]

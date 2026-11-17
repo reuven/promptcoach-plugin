@@ -82,7 +82,14 @@ _RUNS_PROGRAM = frozenset(
     {("uv", "run"), ("uv", "tool"), ("npm", "exec"), ("pnpm", "exec"), ("yarn", "exec")}
     | {(runner, "run") for runner in ("poetry", "pipenv", "pdm", "hatch", "conda", "pipx")}
 )
-_FILE_LIKE = re.compile(r"\.{1,2}|.*/.*|.*\.[A-Za-z][A-Za-z0-9]{0,7}")
+# A positional word is kept only if it is plainly a path: it has a "/", or
+# ends in an extension of the kinds of files a coached project works on.
+# "hunter2.Pw" or "notes.txt.Pw1" look like files to a looser rule.
+_FILE_LIKE = re.compile(
+    r".*/.*|.*\.(?:py|ipynb|toml|md|txt|json|ya?ml|cfg|ini|csv|parquet|sql|sh|js|ts"
+    r"|html|css|r|rmd)",
+    re.IGNORECASE,
+)
 _SKILL = re.compile(r"[\w.:@/ -]{1,80}")
 
 Token = tuple[str, bool, bool]  # (text, is_operator, was_quoted)

@@ -392,7 +392,7 @@ def test_blocked_prompt_keeps_no_snapshot(
     _state(data_dir, prompt_only=False)
     server.reply = {"message": "Level set.", "block_prompt": True, "prompt_only": False}
 
-    run_hook("before", prompt_payload(repo, "coach, quiet"), env)
+    run_hook("before", prompt_payload(repo, "coach, quieter"), env)
 
     assert not list(data_dir.glob("snap-*"))
 

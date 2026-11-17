@@ -16,6 +16,11 @@ Promises kept here, whatever the agent:
 - Prompt-only mode, when the person or the server asked for it, or when the
   server's setting isn't known yet: no diff, no command output, commands as
   skeletons, no agent reply.
+- Secrets filtered first (``redact``): no output from commands that print
+  credentials, and common token shapes redacted. The server scrubs again.
+- One deadline per hook: every git call and the request share it.
+- A block is honored only for a coach command ("coach, quieter").
+- Every string sent is valid UTF-8.
 """
 
 from __future__ import annotations
@@ -37,6 +42,8 @@ from typing import Any
 from . import gitdiff
 from .contract import (
     AGENTS,
+    COMMAND_PATTERN,
+    COMMAND_SYNONYMS,
     GLOBAL_INSTRUCTION_FILES,
     ID_PATTERN,
     MAX_COMMAND_CHARS,
@@ -47,15 +54,19 @@ from .contract import (
     PROJECT_INSTRUCTION_FILES,
     VERSION_PATTERN,
 )
+from .redact import prints_secrets, redact
 from .setup_scan import SetupSources, collect_setup
 from .skeleton import command_skeleton
 
 DEFAULT_SERVER_URL = "https://coach.lernerpython.com"
-BEFORE_HTTP_TIMEOUT_S = 1.8  # the server answers within 1.4 s; the hook gets 3 s
-BEFORE_SNAPSHOT_S = 2.5  # the snapshot runs alongside the request
-AFTER_HTTP_TIMEOUT_S = 12.0  # the hook gets 15 s
+# Each hook's whole budget, inside the agent's timeout (3 s and 15 s) with
+# room for Python to start and stop; the request's own cap within it.
 BEFORE_BUDGET_S = 2.6
+BEFORE_HTTP_TIMEOUT_S = 1.8  # the server answers within 1.4 s
 AFTER_BUDGET_S = 13.5
+AFTER_HTTP_TIMEOUT_S = 12.0
+JOIN_GRACE_S = 0.2  # for a git call stopped at the deadline to be killed
+MAX_COMMAND_PROMPT_CHARS = 1_000  # a coach command is short
 MAX_REPLY_BYTES = 256_000
 STALE_AFTER_S = 24 * 3600
 LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1"})
@@ -64,6 +75,11 @@ _ID = re.compile(ID_PATTERN)
 _VERSION = re.compile(VERSION_PATTERN)
 _FILE_SAFE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 _TEMP_PREFIXES = ("snap-", "idx-", "runs-")
+_COMMAND = re.compile(COMMAND_PATTERN, re.IGNORECASE | re.ASCII)
+_SURROGATE = re.compile("[\ud800-\udfff]")
+# C0 and C1 controls (and DEL), except newline and tab: no terminal escapes.
+_CONTROL = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+MAX_MESSAGE_BYTES = 4096
 
 
 @dataclass(frozen=True)
@@ -156,6 +172,48 @@ def parse_bool(value: str | None) -> bool:
     return (value or "").strip().lower() in {"true", "1", "yes", "on"}
 
 
+def valid_text(value: Any) -> Any:
+    """``value`` with every string made valid UTF-8 (lone surrogates replaced).
+
+    Why: a payload decoded from JSON can carry a lone surrogate, which
+    ``json.dumps`` writes as an escape the server's parser refuses (a 422 is
+    silence). Dicts and lists are copied; other values are returned as is.
+    """
+    if isinstance(value, str):
+        return _SURROGATE.sub("\ufffd", value)
+    if isinstance(value, dict):
+        return {valid_text(k): valid_text(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [valid_text(v) for v in value]
+    return value
+
+
+def clean_message(message: str) -> str:
+    """A server message made safe to show: no control characters except
+    newline and tab (no terminal escapes), valid UTF-8, at most 4 KB."""
+    text = _CONTROL.sub("", valid_text(message))
+    return text.encode("utf-8")[:MAX_MESSAGE_BYTES].decode("utf-8", errors="ignore")
+
+
+def is_coach_command(prompt: str) -> bool:
+    """True if the whole prompt is a coach command, as the server reads one.
+
+    Only such a prompt may be kept from the agent: a block reply for any
+    other prompt is shown as a plain message and the prompt goes through.
+    Mirrors the server's ``parse_command`` (the pattern is pinned by the
+    contract test): whitespace collapsed, a curly apostrophe counts as a
+    straight one, and the phrase must be a known command.
+    """
+    if len(prompt) > MAX_COMMAND_PROMPT_CHARS:
+        return False
+    match = _COMMAND.fullmatch(" ".join(prompt.split()))
+    if match is None:
+        return False
+    said = match["cmd"] or match["say"]
+    key = " ".join(said.lower().replace("-", " ").replace("\u2019", "'").split())
+    return key in COMMAND_SYNONYMS
+
+
 def endpoint(server_url: str, path: str) -> str | None:
     """The URL for ``path`` on the coach server, or None if it isn't allowed.
 
@@ -191,10 +249,12 @@ def post(
 
     ``timeout`` bounds the whole call (name lookup and a slow, trickling
     server included), not only each socket read: the request runs in a
-    daemon thread that the hook simply stops waiting for.
+    daemon thread that the hook simply stops waiting for. Any error in that
+    thread ends it quietly (nothing on stderr).
     """
-    if url is None:
+    if url is None or timeout <= 0:
         return None
+    body = valid_text(body)
     result: list[dict[str, Any]] = []
 
     def call() -> None:
@@ -215,7 +275,7 @@ def post(
         except urllib.error.HTTPError as error:  # 4xx, 5xx, or a refused redirect
             error.close()
             return
-        except (OSError, ValueError):  # refused, timed out, not JSON
+        except Exception:  # noqa: BLE001 - refused, timed out, not HTTP, not JSON
             return
         if isinstance(data, dict):
             result.append(data)
@@ -266,10 +326,6 @@ class Store:
         )
         return self.data_dir / f"{prefix}{key}"
 
-    def index_path(self, session_id: str) -> Path | None:
-        """Where a private git index for this session may live."""
-        return self._path("idx-", session_id)
-
     def _read_json(self, path: Path | None) -> Any:
         try:
             return json.loads(path.read_text(encoding="utf-8")) if path else None
@@ -277,15 +333,21 @@ class Store:
             return None
 
     def _write_json(self, path: Path, value: object) -> None:
-        """Write atomically, so a hook killed mid-write leaves the old file."""
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".tmp-")
+        """Write atomically, so a hook killed mid-write leaves the old file.
+
+        Best effort: a data dir that can't be written (read-only, full)
+        loses the state, never the reply.
+        """
+        tmp = None
         try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".tmp-")
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(value, f)
             os.replace(tmp, path)
         except OSError:
-            Path(tmp).unlink(missing_ok=True)
+            if tmp is not None:
+                Path(tmp).unlink(missing_ok=True)
 
     def _state(self) -> dict[str, Any]:
         state = self._read_json(self.data_dir / "state.json" if self.data_dir else None)
@@ -419,10 +481,12 @@ def before(event: PromptSubmitted, config: Config, profile: AgentProfile) -> Rep
     """Coach a prompt before the agent sees it.
 
     The start-of-turn snapshot is taken alongside the request (unless the
-    person chose prompt-only mode), so the two together fit the hook's time
-    limit. A prompt the server blocks never reaches the agent, so its
-    snapshot is dropped.
+    person chose prompt-only mode); both end by the hook's deadline. A
+    prompt the server blocks never reaches the agent, so its snapshot is
+    dropped; the server may block only a coach command. The reply is
+    built before any state is saved, and saving is best effort.
     """
+    deadline = gitdiff.Deadline(BEFORE_BUDGET_S)
     store = Store(config.data_dir)
     store.sweep(time.time())
     if not _valid_ids(event.session_id, event.prompt_id):
@@ -432,12 +496,15 @@ def before(event: PromptSubmitted, config: Config, profile: AgentProfile) -> Rep
             return Reply(profile.missing_token_message, False, True)
         return None
     trees: list[str] = []
-    index = store.index_path(event.session_id)
     snapper = None
-    if not config.prompt_only and index is not None:
+    data_dir = config.data_dir
+    if not config.prompt_only and data_dir is not None:
 
         def take() -> None:
-            tree = gitdiff.snapshot(event.cwd, index, BEFORE_SNAPSHOT_S)
+            try:
+                tree = gitdiff.snapshot(event.cwd, data_dir, deadline)
+            except Exception:  # noqa: BLE001 - a thread's error would print to stderr
+                return
             trees.extend([tree] if tree else [])
 
         snapper = threading.Thread(target=take, daemon=True)
@@ -454,12 +521,12 @@ def before(event: PromptSubmitted, config: Config, profile: AgentProfile) -> Rep
         ),
         "capabilities": _capabilities(profile),
     }
-    started = time.monotonic()
-    reply = parse_reply(
-        post(endpoint(config.server_url, "/v1/before"), config.token, body, BEFORE_HTTP_TIMEOUT_S)
-    )
+    url = endpoint(config.server_url, "/v1/before")
+    reply = parse_reply(post(url, config.token, body, deadline.left(BEFORE_HTTP_TIMEOUT_S)))
     if snapper is not None:
-        snapper.join(max(BEFORE_SNAPSHOT_S - (time.monotonic() - started), 0.0))
+        snapper.join(deadline.left() + JOIN_GRACE_S)
+    if reply is not None and reply.block and not is_coach_command(event.prompt):
+        reply = Reply(reply.message, False, reply.prompt_only)
     if reply is not None:
         store.set_server_prompt_only(reply.prompt_only)
     if trees and not (reply is not None and reply.block):
@@ -470,18 +537,28 @@ def before(event: PromptSubmitted, config: Config, profile: AgentProfile) -> Rep
 def record(event: ToolRan, config: Config) -> None:
     """Note one shell command the agent ran, for the end of the turn. No network.
 
-    If the person chose prompt-only mode, the output is never even written.
+    If the person chose prompt-only mode, or the command plainly prints
+    credentials (``cat .env``, ``printenv``), the output is never even
+    written; the run itself and its exit code are.
     """
     if not _valid_ids(event.session_id):
         return
+    keep_output = not config.prompt_only and not prints_secrets(event.command)
     run: dict[str, object] = {
         "prompt_id": event.prompt_id,
         "command": event.command[:MAX_COMMAND_CHARS],
         "exit_code": event.exit_code,
-        "output_tail": "" if config.prompt_only else event.output[-MAX_OUTPUT_CHARS:],
+        "output_tail": event.output[-MAX_OUTPUT_CHARS:] if keep_output else "",
         "is_test": bool(IS_TEST.search(event.command)),
     }
     Store(config.data_dir).append_run(event.session_id, run)
+
+
+def _output_tail(command: str, output: object, prompt_only: bool) -> str:
+    """What may be sent of a run's output: its redacted tail, or nothing."""
+    if prompt_only or not isinstance(output, str) or prints_secrets(command):
+        return ""
+    return redact(output[-MAX_OUTPUT_CHARS:])[-MAX_OUTPUT_CHARS:]
 
 
 def _tool_runs(
@@ -499,13 +576,25 @@ def _tool_runs(
                 if prompt_only
                 else command[:MAX_COMMAND_CHARS],
                 "exit_code": code if isinstance(code, int) and not isinstance(code, bool) else None,
-                "output_tail": ""
-                if prompt_only or not isinstance(output, str)
-                else output[-MAX_OUTPUT_CHARS:],
+                "output_tail": _output_tail(command, output, prompt_only),
                 "is_test": bool(IS_TEST.search(command)),
             }
         )
     return out[-MAX_TOOL_RUNS:]
+
+
+def _turn_diff(
+    event: TurnEnded, config: Config, start_tree: str | None, deadline: gitdiff.Deadline
+) -> str | None:
+    """This turn's diff (snapshot to snapshot, else ``git diff HEAD``), redacted."""
+    end_tree = None
+    if start_tree and config.data_dir is not None:
+        end_tree = gitdiff.snapshot(event.cwd, config.data_dir, deadline)
+    if start_tree and end_tree:
+        diff = gitdiff.diff_trees(event.cwd, start_tree, end_tree, deadline)
+    else:
+        diff = gitdiff.collect_diff(event.cwd, deadline)
+    return None if diff is None else gitdiff.cap_diff(redact(diff))
 
 
 def after(event: TurnEnded, config: Config, profile: AgentProfile) -> Reply | None:
@@ -514,8 +603,10 @@ def after(event: TurnEnded, config: Config, profile: AgentProfile) -> Reply | No
     A turn with no start-of-turn snapshot (the agent ran a shell command the
     person typed, or the plugin was installed mid-session) is normal: it
     falls back to ``git diff HEAD``. The snapshot and the runs file are
-    removed whatever happens.
+    removed whatever happens. Steps that would start after the hook's
+    deadline are skipped. The end of a turn never blocks.
     """
+    deadline = gitdiff.Deadline(AFTER_BUDGET_S)
     if event.continuing:
         return None
     store = Store(config.data_dir)
@@ -527,16 +618,11 @@ def after(event: TurnEnded, config: Config, profile: AgentProfile) -> Reply | No
         return None
     prompt_only = effective_prompt_only(config, store)
     diff = None
-    if not prompt_only:
-        index = store.index_path(event.session_id)
-        end_tree = gitdiff.snapshot(event.cwd, index) if start_tree and index else None
-        if start_tree and end_tree:
-            diff = gitdiff.diff_trees(event.cwd, start_tree, end_tree)
-        else:
-            diff = gitdiff.collect_diff(event.cwd)
+    if not prompt_only and not deadline.spent():
+        diff = _turn_diff(event, config, start_tree, deadline)
     reply_text = None
     if profile.capabilities.has_reply and event.reply is not None and not prompt_only:
-        reply_text = event.reply[-MAX_REPLY_CHARS:]
+        reply_text = redact(event.reply[-MAX_REPLY_CHARS:])[-MAX_REPLY_CHARS:]
     body = {
         "agent": profile.agent,
         "plugin_version": profile.plugin_version,
@@ -548,9 +634,8 @@ def after(event: TurnEnded, config: Config, profile: AgentProfile) -> Reply | No
         "prompt_only": prompt_only,
         "capabilities": _capabilities(profile),
     }
-    reply = parse_reply(
-        post(endpoint(config.server_url, "/v1/after"), config.token, body, AFTER_HTTP_TIMEOUT_S)
-    )
+    url = endpoint(config.server_url, "/v1/after")
+    reply = parse_reply(post(url, config.token, body, deadline.left(AFTER_HTTP_TIMEOUT_S)))
     if reply is None:
         return None
     store.set_server_prompt_only(reply.prompt_only)

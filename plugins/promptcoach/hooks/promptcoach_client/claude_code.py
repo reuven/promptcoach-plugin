@@ -138,13 +138,16 @@ def emit(reply: core.Reply | None, stdout: TextIO, *, allow_block: bool) -> None
     where ``allow_block``, ``decision: block``. Never plain text: on
     ``UserPromptSubmit`` that would go into Claude's context. A block on
     ``Stop`` would make Claude keep going, so it is never allowed there.
+    The message loses control characters (no terminal escapes) and is
+    capped at 4 KB.
     """
     if reply is None or reply.message is None:
         return
+    message = core.clean_message(reply.message)
     if reply.block and allow_block:
-        out = {"decision": "block", "reason": reply.message}
+        out = {"decision": "block", "reason": message}
     else:
-        out = {"systemMessage": reply.message}
+        out = {"systemMessage": message}
     stdout.write(json.dumps(out))
     stdout.flush()
 

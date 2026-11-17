@@ -202,6 +202,7 @@ def test_block_is_honored_for_a_coach_command(
         "coach, be helpful",
         "coach, quieter\nand then fix the bug",
         "coach, thank\u017f",
+        "coach, quieter" + " " * 1_000,  # a command is short; long prompts aren't read
     ],
 )
 def test_block_is_ignored_for_an_ordinary_prompt(

@@ -130,7 +130,7 @@ def test_repo_local_git_config_never_runs(
     if with_filter:
         assert diffs == [None, None]  # a repo-defined filter: no diff at all, silently
     else:
-        assert all("+print('v2')" in d for d in diffs)
+        assert all("+print('v2')" in d for d in diffs), diffs
 
 
 # --- break-check gaps: a trickling server, and Stop never blocks --------------------

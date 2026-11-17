@@ -148,7 +148,14 @@ def test_unterminated_private_key_is_redacted_to_the_end() -> None:
 
 @pytest.mark.parametrize(
     "text",
-    ["print('hello')", "def test_login(): ...", "tokens are cheap", "task-runner-01", ""],
+    [
+        "print('hello')",
+        "def test_login(): ...",
+        "tokens are cheap",
+        "task-runner-01",
+        "",
+        "PASSWORD=\nnext",  # nothing after the name on its line
+    ],
 )
 def test_ordinary_text_is_kept(text: str) -> None:
     assert redact(text) == text

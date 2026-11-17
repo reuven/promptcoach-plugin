@@ -91,7 +91,6 @@ def test_profile_refuses_what_the_server_would(changes: dict[str, Any]) -> None:
 
 def test_store_without_data_dir() -> None:
     store = core.Store(None)
-    assert store.index_path("s") is None
     assert store.server_prompt_only() is None
     store.set_server_prompt_only(True)
     assert store.first_warning("s") is False
@@ -104,9 +103,11 @@ def test_store_without_data_dir() -> None:
 
 def test_store_hashes_unsafe_session_ids(tmp_path: Path) -> None:
     store = core.Store(tmp_path)
-    path = store.index_path("a:b.c")
-    assert path is not None and path.name.startswith("idx-") and ":" not in path.name
-    assert store.index_path("abc") == tmp_path / "idx-abc"
+    store.save_snapshot("a:b.c", "p", "a" * 40)
+    store.save_snapshot("abc", "p", "a" * 40)
+    names = sorted(p.name for p in tmp_path.iterdir())
+    assert len(names) == 2 and "snap-abc" in names
+    assert all(n.startswith("snap-") and ":" not in n for n in names)
 
 
 def test_store_tolerates_bad_files(tmp_path: Path) -> None:
@@ -260,14 +261,14 @@ def test_run_git_ignores_inherited_git_variables(
 
 
 def test_snapshot_outside_a_repo(tmp_path: Path) -> None:
-    assert gitdiff.snapshot(tmp_path, tmp_path / "idx") is None
-    assert not (tmp_path / "idx").exists()
+    assert gitdiff.snapshot(tmp_path, tmp_path / "data", gitdiff.Deadline(10)) is None
+    assert not (tmp_path / "data").exists()
 
 
 def test_snapshot_in_a_fresh_repo_has_no_index_to_copy(project: Path, tmp_path: Path) -> None:
     git(project, "init", "-q")
     (project / "a.py").write_text("a\n")
-    tree = gitdiff.snapshot(project, tmp_path / "data" / "idx")
+    tree = gitdiff.snapshot(project, tmp_path / "data", gitdiff.Deadline(10))
     assert tree is not None and len(tree) == 40
 
 
@@ -283,17 +284,18 @@ def test_snapshot_git_failures(
         return None if " ".join(args).startswith(failing) else real(args, cwd, **kwargs)
 
     monkeypatch.setattr(gitdiff, "run_git", fake)
-    assert gitdiff.snapshot(repo, tmp_path / "idx") is None
+    assert gitdiff.snapshot(repo, tmp_path / "data", gitdiff.Deadline(10)) is None
+    assert list((tmp_path / "data").glob("*")) == []
 
 
 def test_snapshot_os_error(repo: Path, tmp_path: Path) -> None:
     blocker = tmp_path / "file"
     blocker.write_text("x")
-    assert gitdiff.snapshot(repo, blocker / "idx") is None
+    assert gitdiff.snapshot(repo, blocker / "data", gitdiff.Deadline(10)) is None
 
 
 def test_diff_trees_outside_a_repo(tmp_path: Path) -> None:
-    assert gitdiff.diff_trees(tmp_path, "a" * 40, "b" * 40) is None
+    assert gitdiff.diff_trees(tmp_path, "a" * 40, "b" * 40, gitdiff.Deadline(10)) is None
 
 
 def test_collect_diff_no_commits_cases(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:

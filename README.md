@@ -23,9 +23,11 @@ and Claude never acts on it by itself.
 4. Turn on auto-update: `/plugin` → Marketplaces → promptcoach → enable
    auto-update. Third-party marketplaces don't update on their own.
 
-The hooks need `python3` 3.10 or newer on your `PATH`; if yours is older,
-the coach says so once per session and otherwise stays out of the way.
-Nothing else is installed: the hook code uses only Python's standard library.
+The hooks need `python3` 3.9 or newer on your `PATH` (the one macOS ships
+is fine); if yours is older, the coach says so once per session and
+otherwise stays out of the way. Nothing else is installed: the hook code uses
+only Python's standard library, and runs as `python3 -I`, so modules in your
+project (or on your `PYTHONPATH`) are never loaded into it.
 
 To change your token or settings later: `/plugin` → promptcoach → Configure.
 
@@ -52,16 +54,34 @@ When Claude finishes a turn, it sends:
   characters of their output;
 - Claude's final reply.
 
-Never sent: `.env` files, `.envrc`, private keys, `*.pem`, `credentials.json`,
-`.netrc`, `.pypirc`, `.npmrc`, cloud credentials and similar files. They are
-left out of every snapshot and diff on your machine, and the server refuses
-them too. The server also scrubs secrets from everything it stores.
+Credential files (`.env` files, `.envrc`, private keys, `*.pem`,
+`credentials.json`, `.netrc`, `.pypirc`, `.npmrc`, cloud credentials and
+similar files) are left out of every snapshot and diff on your machine, and
+the server refuses them too.
+
+Secrets can still turn up elsewhere: in a command's output, in Claude's
+reply, or pasted into a source file. The plugin filters the common ones
+before anything leaves your machine. A command that reads a credential file
+(`cat .env`, `source .env`, `< .env`) or prints the environment (`env`,
+`printenv`, `export -p`) has its output dropped, and well-known token shapes
+(`sk-...`, `ghp_...`, `AKIA...`, private-key blocks and the like) and the
+values of lines such as `DB_PASSWORD=...` or `api_key: ...` are replaced with
+`[REDACTED]` in output, replies and diffs. The server scrubs secrets again
+from everything it stores. This is a filter for the usual cases, not a
+guarantee: a secret in an unusual shape can get through, so keep secrets out
+of code and output, or use prompt-only mode.
 
 The snapshots are made with a private git index file, so your own index,
-staging area and stash are never touched. The plugin never runs programs a
-repository's own git config names (an fsmonitor hook, hooks, diff drivers);
-a repository whose own config defines a clean/smudge filter gets no diff at
-all. Files are read only where they are: a `CLAUDE.md` or `.claude/` that is
+staging area and stash are never touched. Making one does write git objects
+(the blobs and trees of your work tree) into the repository's
+`.git/objects`; nothing refers to them, and `git gc` removes them in time.
+The plugin never runs programs a repository's own git config names (an
+fsmonitor hook, hooks, diff drivers), never fetches (a partial clone's
+missing objects stay missing), and shows a submodule only as a commit line,
+never its files. A repository whose own config defines a clean/smudge filter
+gets no diff at all, and so does one whose `.git` points somewhere else (a
+`gitdir:` file or `core.worktree`), unless it is a linked worktree that its
+main repository lists. Files are read only where they are: a `CLAUDE.md` or `.claude/` that is
 a symlink out of the project (or out of your home directory, for the global
 files), or to a credential file, is treated as absent.
 
@@ -75,7 +95,8 @@ prompt-only mode:
 
 - no diffs, no command output and no Claude reply are sent;
 - commands are reduced to an outline: the program, its known subcommands,
-  option names without their values, and file paths
+  option names without their values, and file paths (a word with a `/`, or
+  ending in a common extension such as `.py`, `.toml` or `.csv`)
   (`uv run pytest tests/x.py -k slow` is sent as `uv run pytest tests/x.py -k`,
   `python -c '...'` as `python -c`, `mysql -p secret` as `mysql`);
 - your prompts, your instructions files and the setup facts above are still
@@ -92,6 +113,18 @@ can opt out of cross-subscriber learning, or delete everything, at any time
 from <https://coach.lernerpython.com/settings>. The full notice is shown when
 you sign in at <https://coach.lernerpython.com/signin>.
 
+## Time limits
+
+Each hook has one time budget for all its work: 2.6 seconds before a prompt
+and 13.5 seconds at the end of a turn, inside Claude Code's own limits. A
+slow git or a slow server means less coaching for that turn, never a stuck
+session. The server can keep a prompt from Claude only when the prompt is a
+coach command such as `coach, quieter`.
+
+## License
+
+MIT; see [LICENSE](LICENSE).
+
 ## Development
 
 ```
@@ -99,7 +132,9 @@ uv sync
 uv run ruff format --check
 uv run ruff check
 uv run mypy
+uv run mypy --python-version 3.10 tests
 uv run pytest
+uv run --isolated --no-project --python 3.9 --with 'pytest<9' --with pytest-cov pytest
 claude plugin validate ./plugins/promptcoach --strict
 claude plugin validate .
 ```

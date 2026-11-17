@@ -232,6 +232,12 @@ def test_worktree_file_naming_an_unregistered_worktree_gets_no_diff(
     assert _diffs(server) == [None, None]
 
 
+def test_unreadable_worktree_link_is_not_trusted(tmp_path: Path) -> None:
+    common = tmp_path / "main" / ".git"
+    (common / "worktrees" / "wt").mkdir(parents=True)  # no "gitdir" file in it
+    assert not gitdiff._own_git_dir(tmp_path / "wt", common / "worktrees" / "wt", common)
+
+
 # --- mutation survivors: diff drivers, hooks ------------------------------------------
 
 
@@ -265,3 +271,29 @@ def test_repo_hooks_path_never_runs(
     _turn(repo, env, repo / "app.py", "print('v2')\n")
 
     assert not marker.exists()
+
+
+# --- the private index keeps git's racy-clean check working ---------------------------
+
+
+def test_same_size_edit_with_an_unchanged_mtime_is_seen(repo: Path, tmp_path: Path) -> None:
+    """Git trusts an entry's stat data only if the file is older than the index.
+
+    The private index is a copy of the real one; with the copy's own (new)
+    mtime, an edit that kept size and mtime (coarse timestamps, or a tool
+    that restores them) would look clean and be missed.
+    """
+    git(repo, "config", "core.trustctime", "false")
+    stamp = 1_700_000_000
+    os.utime(repo / "app.py", (stamp, stamp))
+    git(repo, "update-index", "--refresh")
+    os.utime(repo / ".git" / "index", (stamp, stamp))
+    data = tmp_path / "data"
+    before = gitdiff.snapshot(repo, data, gitdiff.Deadline(10))
+
+    (repo / "app.py").write_text("print('v2')\n")  # same size as v1
+    os.utime(repo / "app.py", (stamp, stamp))
+    after = gitdiff.snapshot(repo, data, gitdiff.Deadline(10))
+
+    assert before is not None and after is not None
+    assert before != after
