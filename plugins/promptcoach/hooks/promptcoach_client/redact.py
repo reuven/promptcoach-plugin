@@ -25,6 +25,7 @@ megabyte of hostile text takes milliseconds.
 from __future__ import annotations
 
 import fnmatch
+import functools
 import re
 
 from .forbidden import (
@@ -41,8 +42,10 @@ REDACTED = "[REDACTED]"
 # ("\\nsk-ant-...", "x_ghp_...", "1AKIA..."); short generic ones only where
 # no letter comes right before, so "task-management-..." isn't "sk-...".
 _NO_LETTER = r"(?<![A-Za-z])"
+# The lookahead skips, in one step, every position no token can start at.
 _TOKENS = re.compile(
-    "|".join(
+    r"(?=[ABGaeghnprsxy])(?:"
+    + "|".join(
         [
             r"sk-ant-[A-Za-z0-9_-]{12,}",
             _NO_LETTER + r"sk-[A-Za-z0-9_-]{12,}",
@@ -60,38 +63,57 @@ _TOKENS = re.compile(
             _NO_LETTER + r"eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*",
         ]
     )
+    + ")"
 )
 _CREDENTIAL_WORDS = r"(?:password|passwd|secret|token|api_?key)"
 # Command-line and markup forms: --password VALUE, mysql/docker login -p,
 # -u user:pass, <password>...</password>, key="DbPassword" value="...",
 # and login("user", "pass").
-_FORMS = [
-    re.compile(
-        r"((?<![A-Za-z0-9_-])--(?:password|passwd|token|secret|api-key|api_key|apikey)"
-        r"(?:=|[ \t]+))(?![-\s])\S+",
-        re.IGNORECASE,
+# Each form with a literal it can't match without: a quick "in" check
+# skips the scan.
+_FORMS: list[tuple[str, re.Pattern[str]]] = [
+    (
+        "--",
+        re.compile(
+            r"((?<![A-Za-z0-9_-])--(?:password|passwd|token|secret|api-key|api_key|apikey)"
+            r"(?:=|[ \t]+))(?![-\s])\S+",
+            re.IGNORECASE,
+        ),
     ),
-    re.compile(
-        r"((?<![A-Za-z0-9_-])(?:mysql|mysqldump|mysqladmin|mariadb|(?:docker|podman)[ \t]+login)"
-        r"(?:[ \t]+\S+){0,12}?[ \t]+-p[ \t]*)(?![-\s])\S+"
+    (
+        "-p",
+        re.compile(
+            r"((?<![A-Za-z0-9_-])(?:mysql|mysqldump|mysqladmin|mariadb"
+            r"|(?:docker|podman)[ \t]+login)"
+            r"(?:[ \t]+\S+){0,12}?[ \t]+-p[ \t]*)(?![-\s])\S+"
+        ),
     ),
-    re.compile(r"((?<![A-Za-z0-9_-])(?:-u|--user)[ \t]+[^\s:]{1,200}:)\S+"),
-    re.compile(
-        r"(<((?:[A-Za-z0-9_-]{1,40}:)?[A-Za-z0-9_-]{0,40}"
-        + _CREDENTIAL_WORDS
-        + r"[A-Za-z0-9_-]{0,40})>)"
-        r"[^<\n]*(?P<tail></\2>)",
-        re.IGNORECASE,
+    ("-u", re.compile(r"((?<![A-Za-z0-9_-])(?:-u|--user)[ \t]+[^\s:]{1,200}:)\S+")),
+    (
+        "</",
+        re.compile(
+            r"(<((?:[A-Za-z0-9_-]{1,40}:)?[A-Za-z0-9_-]{0,40}"
+            + _CREDENTIAL_WORDS
+            + r"[A-Za-z0-9_-]{0,40})>)"
+            r"[^<\n]*(?P<tail></\2>)",
+            re.IGNORECASE,
+        ),
     ),
-    re.compile(
-        r"((?<![A-Za-z0-9_-])(?:key|name)[ \t]*=[ \t]*([\"'])[^\"'\n]{0,80}"
-        + _CREDENTIAL_WORDS
-        + r"[^\"'\n]{0,80}\2[ \t]+value[ \t]*=[ \t]*[\"'])[^\"'\n]*",
-        re.IGNORECASE,
+    (
+        "=",
+        re.compile(
+            r"((?<![A-Za-z0-9_-])(?:key|name)[ \t]*=[ \t]*([\"'])[^\"'\n]{0,80}"
+            + _CREDENTIAL_WORDS
+            + r"[^\"'\n]{0,80}\2[ \t]+value[ \t]*=[ \t]*[\"'])[^\"'\n]*",
+            re.IGNORECASE,
+        ),
     ),
-    re.compile(
-        r"((?<![A-Za-z0-9_])login\([ \t]*(?:\"[^\"\n]{0,200}\"|'[^'\n]{0,200}')[ \t]*,[ \t]*)"
-        r"(?:\"[^\"\n]*\"|'[^'\n]*')"
+    (
+        "login(",
+        re.compile(
+            r"((?<![A-Za-z0-9_])login\([ \t]*(?:\"[^\"\n]{0,200}\"|'[^'\n]{0,200}')[ \t]*,[ \t]*)"
+            r"(?:\"[^\"\n]*\"|'[^'\n]*')"
+        ),
     ),
 ]
 # Kept: the header name and scheme. Gone: the credential after it.
@@ -278,6 +300,7 @@ def _parts(name: str) -> list[str]:
     return [part.lower() for part in _NAME_PART.findall(name)]
 
 
+@functools.lru_cache(maxsize=4096)  # names repeat (a diff, a YAML file)
 def _is_secret_name(name: str) -> bool:
     """True if a name says password, secret, token, key or credential."""
     if _SECRET_SUBSTRING.search(name):
@@ -348,8 +371,9 @@ def redact(text: str) -> str:
     text = _TOKENS.sub(REDACTED, text)
     text = _AUTH.sub(lambda m: m[1] + REDACTED, text)
     text = _USERINFO.sub(lambda m: m[1] + REDACTED + m[2], text)
-    for form in _FORMS:
-        text = form.sub(lambda m: m[1] + REDACTED + (m.groupdict().get("tail") or ""), text)
+    for needle, form in _FORMS:
+        if needle in text:
+            text = form.sub(lambda m: m[1] + REDACTED + (m.groupdict().get("tail") or ""), text)
     out: list[str] = []
     done = 0  # text before this is already in ``out``
     for match in _NAME.finditer(text):

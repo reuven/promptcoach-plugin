@@ -156,10 +156,19 @@ def test_reply_cut_inside_a_key_is_redacted(
 
 
 def test_many_empty_yaml_keys_are_fast() -> None:
+    """300k chars of ``password:`` lines in under 0.1 s. Coverage's line tracer
+    (sys.settrace, on 3.9) is paused for the timed call: it would time itself."""
     text = "password:\n" * 30_000
-    started = time.perf_counter()
-    redact(text)
-    assert time.perf_counter() - started < 0.1
+    redact(text[:1000])  # warm the caches
+    tracer = sys.gettrace()
+    sys.settrace(None)
+    try:
+        started = time.perf_counter()
+        redact(text)
+        elapsed = time.perf_counter() - started
+    finally:
+        sys.settrace(tracer)
+    assert elapsed < 0.1
 
 
 # --- M-4: the before hook's clock starts when the hook starts ------------------------------
