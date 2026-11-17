@@ -19,7 +19,7 @@ def _hook(mode: str, timeout: int) -> dict[str, object]:
     return {
         "type": "command",
         "command": "python3",
-        "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/coach_hook.py", mode],
+        "args": ["-I", "${CLAUDE_PLUGIN_ROOT}/hooks/coach_hook.py", mode],
         "timeout": timeout,
     }
 

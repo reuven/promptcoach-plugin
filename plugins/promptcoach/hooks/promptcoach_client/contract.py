@@ -101,3 +101,55 @@ MAX_TOOL_RUNS = 50
 MAX_COMMAND_CHARS = 2_000
 MAX_OUTPUT_CHARS = 4_000
 MAX_REPLY_CHARS = 20_000
+
+# Coach commands ("coach, quieter"): the only prompts a server block may keep
+# from the agent. The server's ``COMMAND_RE`` (analysis/rules.py), matched
+# against the whole prompt with IGNORECASE | ASCII, and the phrases it maps
+# to a command; the contract test pins both against the server.
+COMMAND_PATTERN = (
+    r"coach(?:[,:]\s*|\s+)(?:please\s+)?(?:(?:be\s+)?(?P<cmd>quieter"
+    r"|quiet down|louder|more|off|on|status|prompt[- ]only (?:on"
+    r"|off))(?:\s+please)?[.!?]*|(?P<say>helpful|very helpful|that helped"
+    r"|that helps|that was helpful|that(?:['\u2019]s| is) helpful|thanks"
+    r"|thank you|not helpful|unhelpful|that was not helpful"
+    r"|that wasn['\u2019]?t helpful|that(?:['\u2019]s| is) not helpful"
+    r"|that did not help|that didn['\u2019]?t help|learning (?:on|off)"
+    r"|opt out of learning|opt (?:in to|into) learning)(?:\s+please)?[.!]*)"
+)
+COMMAND_SYNONYMS = frozenset(
+    {
+        "helpful",
+        "learning off",
+        "learning on",
+        "louder",
+        "more",
+        "not helpful",
+        "off",
+        "on",
+        "opt in to learning",
+        "opt into learning",
+        "opt out of learning",
+        "prompt only off",
+        "prompt only on",
+        "quiet down",
+        "quieter",
+        "status",
+        "thank you",
+        "thanks",
+        "that did not help",
+        "that didn't help",
+        "that didnt help",
+        "that helped",
+        "that helps",
+        "that is helpful",
+        "that is not helpful",
+        "that was helpful",
+        "that was not helpful",
+        "that wasn't helpful",
+        "that wasnt helpful",
+        "that's helpful",
+        "that's not helpful",
+        "unhelpful",
+        "very helpful",
+    }
+)

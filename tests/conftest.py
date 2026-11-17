@@ -35,7 +35,8 @@ class StubServer:
 
     ``mode`` is one of ``json`` (send ``reply``), ``status`` (send
     ``status`` with an empty body), ``raw`` (send ``raw`` as the body),
-    ``sleep`` (wait up to 5 s, then answer) or ``redirect``.
+    ``sleep`` (wait up to ``delay`` s, then answer), ``redirect`` or
+    ``badstatus`` (a reply that isn't HTTP).
     """
 
     url: str
@@ -44,12 +45,25 @@ class StubServer:
     reply: dict[str, Any] = field(default_factory=lambda: dict(SILENT))
     status: int = 200
     raw: bytes = b""
+    delay: float = 5.0  # how long ``sleep`` waits
+    redirect_to: str = ""  # where ``redirect`` points (default: this server)
+    redirect_status: int = 307
     release: threading.Event = field(default_factory=threading.Event)
 
 
 @pytest.fixture
 def server() -> Iterator[StubServer]:
     """A coach server stub on 127.0.0.1, stopped (and unblocked) after the test."""
+    yield from _stub_server()
+
+
+@pytest.fixture
+def other_server() -> Iterator[StubServer]:
+    """A second stub, on another port: somewhere a redirect might point."""
+    yield from _stub_server()
+
+
+def _stub_server() -> Iterator[StubServer]:
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler)
     httpd.daemon_threads = True
     stub = StubServer(url=f"http://127.0.0.1:{httpd.server_address[1]}")
@@ -58,12 +72,20 @@ def server() -> Iterator[StubServer]:
         def log_message(self, format: str, *args: object) -> None:
             pass
 
+        def do_GET(self) -> None:  # only a followed redirect would ever GET
+            stub.requests.append(Received(self.path, dict(self.headers), {}))
+            self.send_response(200)
+            self.end_headers()
+
         def do_POST(self) -> None:
             length = int(self.headers.get("Content-Length", "0"))
             body = json.loads(self.rfile.read(length))
             stub.requests.append(Received(self.path, dict(self.headers), body))
             if stub.mode == "sleep":
-                stub.release.wait(5)
+                stub.release.wait(stub.delay)
+            if stub.mode == "badstatus":
+                self.wfile.write(b"GARBAGE\r\n\r\n")  # not HTTP: BadStatusLine
+                return
             if stub.mode == "trickle":
                 # Headers, then one byte at a time: no socket read ever times out.
                 self.send_response(200)
@@ -76,8 +98,8 @@ def server() -> Iterator[StubServer]:
                     self.wfile.flush()
                 return
             if stub.mode == "redirect":
-                self.send_response(307)
-                self.send_header("Location", stub.url + "/elsewhere")
+                self.send_response(stub.redirect_status)
+                self.send_header("Location", stub.redirect_to or stub.url + "/elsewhere")
                 self.end_headers()
                 return
             payload = {

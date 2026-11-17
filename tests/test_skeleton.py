@@ -18,7 +18,7 @@ from promptcoach_client.skeleton import (
         ("uv run pytest tests/x.py -k foo", "uv run pytest tests/x.py -k"),
         ("uv run pytest -q tests/", "uv run pytest -q"),
         ("python -m pytest -k slow", "python -m pytest -k"),
-        ("ruff check . || true", "ruff check . || true"),
+        ("ruff check . || true", "ruff check || true"),
         ("cd src && pytest", "cd && pytest"),
         ("pip install requests", "pip install"),
         ("git push origin main", "git push"),
@@ -34,6 +34,23 @@ from promptcoach_client.skeleton import (
         ("aws configure set aws_secret_access_key ABCDEF", "aws"),
         ("deploy hunter2", "deploy"),
         ("export TOKEN=abc", "export"),
+        # A positional word is a path only with a "/" or a known extension (M8).
+        ("mytool login hunter2.Pw", "mytool"),
+        ("cat secret_notes.txt.Pw1", "cat"),
+        ("./deploy.sh prod s3cr3t.Passw0rd", "./deploy.sh"),
+        ("jq .token creds.json", "jq creds.json"),
+        ("python manage.py migrate", "python manage.py"),
+        ("Rscript analysis.R data/raw.CSV", "Rscript analysis.R data/raw.CSV"),
+        (
+            "cat notes.Rmd q.sql run.sh ui.ts a.js b.html c.css",
+            "cat notes.Rmd q.sql run.sh ui.ts a.js b.html c.css",
+        ),
+        (
+            "cat a.ipynb b.toml c.md d.txt e.json f.yaml g.yml h.cfg i.ini j.parquet",
+            "cat a.ipynb b.toml c.md d.txt e.json f.yaml g.yml h.cfg i.ini j.parquet",
+        ),
+        ("cat backup.tar.gz key.der x.Py3", "cat"),
+        ("ls ..", "ls"),
         # Code after a code flag goes; the flag stays.
         ("python -c 'import os; print(os.environ)'", "python -c"),
         ("python -c print", "python -c"),

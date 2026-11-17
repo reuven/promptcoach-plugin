@@ -55,6 +55,19 @@ _DIFF_FLAGS = (
 )
 
 
+class Deadline:
+    """Stub."""
+
+    def __init__(self, seconds: float) -> None:
+        self.end = time.monotonic() + seconds
+
+    def left(self, cap: float = float("inf")) -> float:
+        return max(min(cap, self.end - time.monotonic()), 0.0)
+
+    def spent(self) -> bool:
+        return self.left() <= 0.0
+
+
 @dataclass(frozen=True)
 class GitOutput:
     """What a git command printed, and whether the size cap cut it short."""

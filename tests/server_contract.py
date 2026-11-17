@@ -51,11 +51,34 @@ def _strings(node: ast.expr) -> list[str]:
     return sorted(value) if isinstance(value, (set, frozenset)) else list(value)
 
 
+def _joined(node: ast.expr, names: dict[str, ast.expr]) -> str:
+    """A string built from literals and f-string references to string constants."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.FormattedValue) and isinstance(node.value, ast.Name):
+        return _joined(names[node.value.id], names)
+    if isinstance(node, ast.JoinedStr):
+        return "".join(_joined(part, names) for part in node.values)
+    raise ValueError("not a plain string")
+
+
+def _flags(node: ast.expr) -> list[str]:
+    """The ``re`` flag names of ``re.A | re.B``."""
+    if isinstance(node, ast.BinOp):
+        return sorted(_flags(node.left) + _flags(node.right))
+    if isinstance(node, ast.Attribute):
+        return [node.attr]
+    raise ValueError("not a flag")
+
+
 def read_server(repo: Path) -> dict[str, Any]:
     """The contract values, parsed from the server's source."""
     src = repo / "src" / "promptcoach"
     schemas = _assignments(src / "schemas.py")
     diffparse = _assignments(src / "diffparse.py")
+    rules = _assignments(src / "analysis" / "rules.py")
+    command_re = rules["COMMAND_RE"]
+    assert isinstance(command_re, ast.Call)
     snapshot = next(
         n
         for n in ast.walk(ast.parse((src / "schemas.py").read_text()))
@@ -84,6 +107,10 @@ def read_server(repo: Path) -> dict[str, Any]:
         "forbidden_suffixes": _strings(diffparse["_FORBIDDEN_SUFFIXES"]),
         "forbidden_path_endings": _strings(diffparse["_FORBIDDEN_PATH_ENDINGS"]),
         "env_template_suffixes": _strings(diffparse["_ENV_TEMPLATE_SUFFIXES"]),
+        # Which prompts are coach commands, the only ones a block may keep from the agent.
+        "command_pattern": _joined(command_re.args[0], rules),
+        "command_flags": _flags(command_re.args[1]),
+        "command_synonyms": sorted(ast.literal_eval(rules["COMMAND_SYNONYMS"])),
     }
 
 
