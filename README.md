@@ -68,7 +68,9 @@ the environment (`env`, `printenv`, `export -p`, `os.environ`) or asks a tool
 for a secret (`gh auth token`, `kubectl get secret`, `docker compose config`)
 has its output dropped. Well-known token shapes (`sk-...`, `ghp_...`,
 `AKIA...`, `sk_live_...`, `hf_...`, JWTs, `Authorization:` headers, the
-password in `https://user:password@host`, private-key blocks and the like)
+password in `https://user:password@host`, `--password VALUE`,
+`mysql -pVALUE`, `curl -u user:pass`, `<password>...</password>`,
+private-key blocks and the like)
 and the values of lines such as `DB_PASSWORD=...` or `api_key: ...` are
 replaced with `[REDACTED]` in commands, output, replies and diffs. Only a few
 plain code forms are left alone: a token count (`max_tokens=1024`), a name
@@ -138,14 +140,17 @@ you sign in at <https://coach.lernerpython.com/signin>.
 
 ## Time limits
 
-Each hook has one time budget for all its work: 2.6 seconds before a prompt
-and 13.5 seconds at the end of a turn, inside Claude Code's own limits. A
+Each hook has one time budget for all its work: 2.5 seconds before a prompt
+(counted from the moment the hook starts) and 13.5 seconds at the end of a turn, inside Claude Code's own limits. A
 slow git or a slow server means less coaching for that turn, never a stuck
 session. The server can keep a prompt from Claude only when the prompt is a
 coach command such as `coach, quieter`: the plugin checks that itself, and
 if it and the server disagree about a prompt, the prompt goes to Claude (the
 plugin fails open). If Claude Code stops a hook at its limit, any git the
-hook started is stopped with it.
+hook started is stopped with it. A hook killed outright (`kill -9`) can't
+clean up: a git it started then runs to its end, which takes about as long
+as `git add -A` on your project; it writes only the plugin's own private
+index file and unreferenced objects in `.git/objects`.
 
 ## License
 
