@@ -158,6 +158,11 @@ def test_command_text_is_redacted() -> None:
         "ENV=1 env",
         "cat *",
         "x" * 20_000 + " && cat .env",
+        "cat ~/.config/gh/hosts.yml",
+        "cat config/secrets.yml",
+        "cat config/secrets.yaml",
+        "dotenv list",
+        "aws configure export-credentials",
     ],
 )
 def test_more_commands_that_print_secrets(command: str) -> None:
@@ -209,21 +214,31 @@ def test_yaml_value_on_the_next_line_keeps_the_rest() -> None:
     assert redact("password:\n  hunter2plain\nhost: x") == "password:\n  [REDACTED]\nhost: x"
 
 
-# --- N2 and the max_tokens ruling: code stays, literals go --------------------------------
+# --- N2, revised ruling: secret names by parts; fail closed with three narrow exceptions ---
 
 
 @pytest.mark.parametrize(
     "line",
     [
         "max_tokens=1024,",
-        "MAX_TOKENS = 4096",
-        "tokenizer = AutoTokenizer.from_pretrained('gpt2')",
+        "max_tokens: int = 1024",
         "num_tokens: int = len(x)",
+        "total_input_tokens: int | None = None",
+        "cache_read_tokens: Optional[int]",
+        "tokenizer = AutoTokenizer.from_pretrained('gpt2')",
         "+    self.api_key = api_key",
+        "api_key=api_key,",
+        "password=password",
         "secret_santa = draw()",
+        "password = get_password()",
+        'token = os.environ["TOKEN"]',
+        'api_key = os.getenv("X")',
         "if password_hash == compute(pw):",
-        "token: str",
-        "api_key=settings.api_key",
+        "token := next_token()",
+        "auth_url = build(x)",
+        "secret_key: // comment",
+        "bypass = 1",
+        "url: https://docs.python.org",
     ],
 )
 def test_code_with_secret_sounding_names_stays(line: str) -> None:
@@ -239,6 +254,22 @@ def test_code_with_secret_sounding_names_stays(line: str) -> None:
         ("client_secret: s3cr3t-v4lue", "s3cr3t-v4lue"),
         ("DB_PASSWORD=short", "short"),
         ("api_key = 'k'", "'k'"),
+        ("PASSWORD=/abc123", "/abc123"),
+        ("API_KEY==xyz", "xyz"),
+        ("token = hunter2", "hunter2"),
+        ("secret: x9", "x9"),
+        ("MAX_TOKENS = 4096", "4096"),
+        ("API_TOKEN = get_token()", "get_token()"),
+        ("PGPASSWORD=hunter2", "hunter2"),
+        ("token: str", "str"),
+        ("api_key=settings.api_key", "settings.api_key"),
+        ("password: /abc", "/abc"),
+        ("authToken = abc", "abc"),
+        ("privateKey: x1", "x1"),
+        ("credentials = load", "load"),
+        ("max_tokens = 'abc'", "'abc'"),
+        ("hidden_tokens = 12", "12"),
+        ("api_key = other_key", "other_key"),
     ],
 )
 def test_literal_secrets_are_redacted(line: str, secret: str) -> None:
