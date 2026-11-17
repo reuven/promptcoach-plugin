@@ -20,6 +20,7 @@ import pytest
 
 from conftest import StubServer, git, prompt_payload, run_hook, stop_payload
 from promptcoach_client import core, gitdiff
+from promptcoach_client.contract import MAX_OUTPUT_CHARS
 from promptcoach_client.redact import prints_secrets, redact
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -108,9 +109,11 @@ def test_read_control_never_blocks_on_a_fifo(tmp_path: Path) -> None:
     )
     reader.start()
     reader.join(2)
-    if reader.is_alive():  # unblock the stuck open so the thread can end
+    stuck = reader.is_alive()
+    if stuck:  # unblock the stuck open so the thread can end
         with open(tmp_path / "fifo", "w"):
             pass
+    assert not stuck
     assert results == [(False, "")]
 
 
@@ -342,6 +345,16 @@ def test_recorded_tail_is_redacted_before_it_is_cut(
     run_hook("record", payload, env)
 
     assert KEY_BODY not in (data_dir / "runs-sess-1").read_text()
+
+
+def test_tail_cut_inside_a_secret_name_is_redacted() -> None:
+    """Cut first, and the tail would start at ``WORD=...``: no secret name left."""
+    line = "DB_PASSWORD=hunter2plainvalue\n"
+    tail = line[len("DB_PASS") :] + "y\n" * 2_000
+    tail = tail[:MAX_OUTPUT_CHARS]
+    out = "log\n" * 100 + "DB_PASS" + tail
+    assert out[-MAX_OUTPUT_CHARS:].startswith("WORD=hunter2plainvalue")
+    assert "hunter2plainvalue" not in core._output_tail("./run.sh", out, False)
 
 
 def test_orphan_key_end_at_the_start_is_redacted() -> None:
@@ -576,6 +589,15 @@ def test_every_git_call_carries_the_submodule_overrides(
 
 
 # --- N6: git dies with the hook ------------------------------------------------------------
+
+
+def test_the_hook_installs_git_cleanup(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, str], project: Path
+) -> None:
+    calls: list[bool] = []
+    monkeypatch.setattr(gitdiff, "install_cleanup", lambda: calls.append(True))
+    run_hook("after", stop_payload(project), env)
+    assert calls == [True]
 
 
 def test_kill_live_groups(tmp_path: Path) -> None:
