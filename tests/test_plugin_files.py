@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import importlib.util
 import json
+import os
 import re
 import sys
 import sysconfig
@@ -73,11 +74,22 @@ def _is_stdlib(
     if names is not None:
         return name in names
     spec = importlib.util.find_spec(name)
-    origin = spec.origin if spec else None
-    stdlib = sysconfig.get_paths()["stdlib"]
-    return origin in {"built-in", "frozen"} or (
-        origin is not None and origin.startswith(stdlib) and "site-packages" not in origin
-    )
+    origin = spec.origin if spec is not None else None
+    if origin is None:  # not found, or a namespace package: not stdlib
+        return False
+    if origin in {"built-in", "frozen"}:
+        return True
+
+    # Where os loaded from is the stdlib actually in use; sysconfig's
+    # "stdlib" can be spelled differently, or name another tree, on Windows
+    # in a venv. Compare real, case-normalized paths as whole directories.
+    def norm(path: str) -> str:
+        return os.path.normcase(os.path.realpath(path))
+
+    stdlib = os.path.join(norm(os.path.dirname(os.__file__)), "")
+    where = norm(origin)
+    parts = set(where.replace("\\", "/").split("/"))
+    return where.startswith(stdlib) and not parts & {"site-packages", "dist-packages"}
 
 
 @pytest.mark.parametrize("sysconfig_stdlib", ["as-is", "elsewhere"])
