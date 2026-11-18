@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ast
+import contextlib
 import importlib.util
 import json
 import re
@@ -9,10 +11,12 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from conftest import git
 from promptcoach_client import contract as c
-from promptcoach_client import forbidden
+from promptcoach_client import core, forbidden
 from promptcoach_client.claude_code import PROFILE
 from server_contract import contract, pinned, read_server, server_repo
 
@@ -132,3 +136,91 @@ def test_plugin_version_matches_manifest() -> None:
     pyproject = (root / "pyproject.toml").read_text()
     assert manifest["version"] == PROFILE.plugin_version
     assert re.search(r'^version = "(.+)"', pyproject, re.MULTILINE)[1] == PROFILE.plugin_version  # type: ignore[index]
+
+
+# The server's version (feat/ci-fix, src/promptcoach/versions.py): 2 to 4
+# release parts of 1 to 4 ASCII digits, an optional a/b/rc N, an optional
+# .devN (each N 1 to 4 digits), at most 32 characters, matched in full.
+SERVER_VERSION_PATTERN = (
+    r"[0-9]{1,4}(?:\.[0-9]{1,4}){1,3}"
+    r"(?:(?:a|b|rc)[0-9]{1,4})?"
+    r"(?:\.dev[0-9]{1,4})?"
+)
+SERVER_MAX_VERSION_CHARS = 32
+
+
+def test_version_pattern_is_the_servers() -> None:
+    assert (c.VERSION_PATTERN, c.MAX_VERSION_CHARS) == (
+        SERVER_VERSION_PATTERN,
+        SERVER_MAX_VERSION_CHARS,
+    )
+
+
+def test_version_pattern_matches_the_server_source_where_it_is_checked_out() -> None:
+    repo = server_repo()
+    source = repo / "src" / "promptcoach" / "versions.py" if repo else None
+    if source is None or not source.is_file():
+        pytest.skip("no server checkout with versions.py here; the copy above is used")
+    names: dict[str, object] = {}
+    for node in ast.parse(source.read_text()).body:
+        if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name):
+            with contextlib.suppress(ValueError):
+                names[node.targets[0].id] = ast.literal_eval(node.value)
+    assert names["VERSION_PATTERN"] == SERVER_VERSION_PATTERN
+    assert names["MAX_VERSION_CHARS"] == SERVER_MAX_VERSION_CHARS
+
+
+@pytest.mark.parametrize(
+    "version",
+    [
+        "1.0",
+        "1.0.0",
+        "1.0.0b1",
+        "1.0.0a12",
+        "2.1rc3",
+        "1.0.0.dev4",
+        "1.0.0b1.dev2",
+        "0.1.0",
+        "9999.9999.9999.9999",
+        "9999.9999.9999.9999b9999.dev9999",  # 32 characters
+    ],
+)
+def test_versions_the_server_accepts(version: str) -> None:
+    assert core.valid_version(version)
+
+
+@pytest.mark.parametrize(
+    "version",
+    [
+        "1",
+        "1.0.0.0.0",
+        "10000.0",
+        "1.0.0-beta",
+        "1.0.0beta1",
+        "1.0.0c1",
+        "1.0.0b",
+        "1.0.0b12345",
+        "1.0.0.dev",
+        "1.0.0b1.post1",
+        "v1.0.0",
+        "1.0.0 ",
+        "1.0.0\n",
+        "\u0661.0",
+        "1.0+local",
+        "9999.9999.9999.9999rc9999.dev9999",  # 33 characters
+        "",
+    ],
+)
+def test_versions_the_server_refuses(version: str) -> None:
+    assert not core.valid_version(version)
+
+
+@given(st.from_regex(SERVER_VERSION_PATTERN, fullmatch=True))
+def test_every_version_the_client_sends_is_pep_440(version: str) -> None:
+    """The server orders versions by PEP 440, so each one the client accepts
+    must parse as one (packaging, which pytest brings, is the oracle; the
+    client itself never orders versions)."""
+    from packaging.version import Version
+
+    assert core.valid_version(version) == (len(version) <= SERVER_MAX_VERSION_CHARS)
+    Version(version)
