@@ -47,7 +47,7 @@ def windows(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, Any]]:
         return real_popen(*args, **kwargs)
 
     monkeypatch.setattr(gitdiff, "WINDOWS", True)
-    monkeypatch.setattr(gitdiff.subprocess, "Popen", popen)
+    monkeypatch.setattr(subprocess, "Popen", popen)
     monkeypatch.setattr(os, "killpg", lambda *a: calls.append(("killpg", a)), raising=False)
     monkeypatch.setattr(
         signal, "pthread_sigmask", lambda *a: calls.append(("mask", a)), raising=False

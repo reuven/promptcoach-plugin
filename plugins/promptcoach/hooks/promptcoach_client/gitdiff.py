@@ -43,6 +43,10 @@ from .contract import MAX_DIFF_CHARS
 from .forbidden import exclude_pathspecs, is_forbidden_path
 
 GIT_TIMEOUT_S = 3.0
+# Windows has no process groups to kill, no signal masks and no
+# ``preexec_fn``: git runs in a new process group and is killed alone. A
+# module value, so tests can take either branch on any OS.
+WINDOWS = os.name == "nt"
 TRUNCATED = "\n[promptcoach: diff truncated]\n"
 _DIFF_BYTES = MAX_DIFF_CHARS * 4  # UTF-8 never needs more for the cap
 _SMALL_BYTES = 1_000_000  # rev-parse, write-tree, ls-files
@@ -132,11 +136,20 @@ _PENDING_TERM: set[int] = set()
 _STARTING = threading.RLock()
 
 
+def _kill_pid(pid: int) -> None:
+    """Kill a git: its whole process group on POSIX, the process on Windows
+    (where ``os.kill`` with SIGTERM is TerminateProcess)."""
+    with contextlib.suppress(OSError):
+        if WINDOWS:
+            os.kill(pid, signal.SIGTERM)
+        else:
+            os.killpg(pid, signal.SIGKILL)
+
+
 def _kill_live() -> None:
     """Kill every git process group still running."""
     for pgid in list(_LIVE):
-        with contextlib.suppress(OSError):
-            os.killpg(pgid, signal.SIGKILL)
+        _kill_pid(pgid)
         _LIVE.discard(pgid)
 
 
@@ -162,7 +175,7 @@ def _on_term(signum: int, frame: object) -> None:
     before run_git blocked it can land inside git's start, in this thread.
     Then it waits, and run_git runs it again once git is in _LIVE.
     """
-    if signal.SIGTERM in signal.pthread_sigmask(signal.SIG_BLOCK, []):
+    if not WINDOWS and signal.SIGTERM in signal.pthread_sigmask(signal.SIG_BLOCK, []):
         _PENDING_TERM.add(threading.get_ident())
         return
     with _STARTING:
@@ -207,6 +220,19 @@ def _env(index_file: Path | None = None) -> dict[str, str]:
     return env
 
 
+def _start_options(windows: bool) -> dict[str, Any]:
+    """How git is started: in its own session with SIGTERM unblocked (POSIX),
+    or in a new process group (Windows, which has neither)."""
+    if windows:
+        return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200)}
+    return {
+        "start_new_session": True,
+        "preexec_fn": functools.partial(
+            signal.pthread_sigmask, signal.SIG_UNBLOCK, (signal.SIGTERM,)
+        ),
+    }
+
+
 def run_git(
     args: list[str],
     cwd: Path,
@@ -228,7 +254,8 @@ def run_git(
     # lock, from git's start until it is in _LIVE: a stop then always finds
     # it. git itself gets SIGTERM unblocked, so an orphan (a hook killed with
     # SIGKILL) still obeys a later SIGTERM.
-    mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+    windows = WINDOWS
+    mask = None if windows else signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
     try:
         with _STARTING:
             # git from PATH, as the agent runs it; the arguments are ours alone.
@@ -239,16 +266,14 @@ def run_git(
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 env=_env(index_file),
-                start_new_session=True,
-                preexec_fn=functools.partial(
-                    signal.pthread_sigmask, signal.SIG_UNBLOCK, (signal.SIGTERM,)
-                ),
+                **_start_options(windows),
             )
             _LIVE.add(proc.pid)
     except OSError:  # git missing, cwd gone
         return None
     finally:
-        signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+        if mask is not None:
+            signal.pthread_sigmask(signal.SIG_SETMASK, mask)
         if threading.get_ident() in _PENDING_TERM:
             _PENDING_TERM.discard(threading.get_ident())
             _on_term(signal.SIGTERM, None)
@@ -278,9 +303,10 @@ def run_git(
 
 
 def _kill(proc: subprocess.Popen[bytes]) -> None:
-    """Kill git and everything it started (its process group)."""
-    with contextlib.suppress(OSError):
-        os.killpg(proc.pid, signal.SIGKILL)
+    """Kill git and everything it started (its process group; on Windows,
+    git alone)."""
+    if not WINDOWS:
+        _kill_pid(proc.pid)
     proc.kill()
 
 
@@ -346,8 +372,14 @@ def _read_control(path: Path) -> tuple[bool, str]:
     ``(False, "")``: the caller then refuses, so nothing can make the hook
     block on a read.
     """
+    nofollow, nonblock = getattr(os, "O_NOFOLLOW", None), getattr(os, "O_NONBLOCK", None)
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        # Windows has no such flags (and no FIFOs): refuse a symlink, or
+        # anything else not a regular file, before opening it.
+        posix_flags = nofollow is not None and nonblock is not None
+        if not posix_flags and not stat.S_ISREG(os.lstat(path).st_mode):
+            return False, ""
+        fd = os.open(path, os.O_RDONLY | (nofollow or 0) | (nonblock or 0))
     except FileNotFoundError:
         return True, ""
     except OSError:

@@ -35,6 +35,9 @@ files = ["plugins/promptcoach/hooks"]
 mypy_path = ["plugins/promptcoach/hooks", "tests"]
 explicit_package_bases = true
 python_version = "3.9"
+# Checked as Linux on every OS (CI runs on Windows too): the POSIX-only calls
+# in gitdiff are behind a runtime platform value, not sys.platform checks.
+platform = "linux"
 strict = true
 
 [tool.ruff]

@@ -45,6 +45,18 @@ def _warn_old_python(
     return 0
 
 
+def utf8(stream: TextIO) -> None:
+    """Make ``stream`` read or write UTF-8, whatever the locale.
+
+    Why: Claude Code sends and reads UTF-8, but Python 3.9 to 3.14 use the
+    locale's code page for stdio on Windows (often cp1252). Call it before
+    anything is read. A stream that can't be reconfigured is left alone.
+    """
+    reconfigure = getattr(stream, "reconfigure", None)
+    if reconfigure is not None:
+        reconfigure(encoding="utf-8", errors="replace")
+
+
 def run(argv: "list[str]", stdin: TextIO, stdout: TextIO, env: "Mapping[str, str]") -> int:
     """Hand the hook to the client, or warn about an old Python."""
     if tuple(sys.version_info[:2]) < MIN_PYTHON:
@@ -58,4 +70,6 @@ def run(argv: "list[str]", stdin: TextIO, stdout: TextIO, env: "Mapping[str, str
 
 
 if __name__ == "__main__":
+    utf8(sys.stdin)
+    utf8(sys.stdout)
     sys.exit(run(sys.argv[1:], sys.stdin, sys.stdout, os.environ))
