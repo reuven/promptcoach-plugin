@@ -281,3 +281,25 @@ def test_memory_past_the_cap_kills_the_group(tmp_path: Path) -> None:
     text = output.read_text()
     assert re.search(r"ci_run: group RSS \d+ MB passed the 100 MB cap; killed it", text)
     assert "ci_run: peak group RSS" in text
+
+
+@pytest.mark.skipif(os.name == "nt", reason="start_new_session is POSIX")
+def test_a_grandchild_in_its_own_session_holding_the_pipe_does_not_hold_the_run(
+    tmp_path: Path,
+) -> None:
+    """The group kill can't reach a process that started its own session; if
+    it keeps the output pipe open, the runner still returns once its child
+    has exited, after a short wait for the last output."""
+    script = (
+        "import subprocess, sys\n"
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],"
+        " start_new_session=True)\n"
+        "print('child done', flush=True)\n"
+    )
+    started = time.monotonic()
+
+    code = ci_run.run([sys.executable, "-c", script], tmp_path / "o", 60, echo=io.StringIO())
+
+    assert code == 0
+    assert time.monotonic() - started < 10
+    assert "child done" in (tmp_path / "o").read_text()

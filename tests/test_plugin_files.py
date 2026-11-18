@@ -270,3 +270,12 @@ def test_ci_prints_what_each_cell_collects() -> None:
     assert "tools/ci_run.py" in collect.group(1)
     assert "-- uv run pytest --collect-only -q --no-cov" in collect.group(1)
     assert check.index("- name: Collect") < check.index("- name: Tests")
+
+
+def test_ci_lists_survivors_after_the_tests() -> None:
+    check = _ci_jobs()["check"]
+    step = re.search(r"- name: Processes still running\n(.*?)(?=\n      - )", check, re.S)
+    assert step is not None
+    assert "if: ${{ always() }}" in step.group(1)
+    assert "tasklist" in step.group(1) and "ps -ef" in step.group(1)
+    assert check.index("- name: Tests") < check.index("- name: Processes still running")

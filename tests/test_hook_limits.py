@@ -8,6 +8,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -403,3 +404,35 @@ def test_the_hard_limit_leaves_the_per_test_timer_to_act_first() -> None:
     import conftest
 
     assert conftest.HARD_LIMIT_S == conftest.TEST_TIMEOUT_S + 30
+
+
+# --- nothing the suite starts outlives it -------------------------------------------------
+
+LEAVES_A_PROCESS = """
+import subprocess, sys
+
+def test_starts_something_and_forgets_it():
+    subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+"""
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the survivor check reads ps (POSIX)")
+def test_a_process_left_running_fails_the_run_and_is_named(tmp_path: Path) -> None:
+    """A process that outlives the suite can hold a pipe open (CI's step
+    output among them), so the session's end lists it, kills it, and fails."""
+    child = run_child_pytest(tmp_path, "test_leak.py", LEAVES_A_PROCESS)
+
+    assert child.code != 0, child.output
+    assert "still running after the suite" in child.output
+    assert "time.sleep(60)" in child.output
+    [pid] = re.findall(r"^\s*(\d+) .*time\.sleep\(60\)", child.output, re.M)
+    with pytest.raises(OSError):
+        os.kill(int(pid), 0)  # the check killed it
+
+
+def test_survivors_are_found_by_pid_or_group() -> None:
+    import conftest
+
+    ps = "  10  10 S  python a\n  11  10 S  sleep 60\n  12  12 Z  (python)\n  13  99 S  other\n"
+    found = conftest.survivors({10, 12}, ps, me=1)
+    assert [row.split()[0] for row in found] == ["10", "11"]
