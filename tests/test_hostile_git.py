@@ -226,6 +226,23 @@ def test_linked_worktree_still_gets_its_diff(
     assert all(isinstance(d, str) and "+print('in the worktree')" in d for d in diffs)
 
 
+def test_linked_worktree_whose_gitdir_file_has_crlf_still_gets_its_diff(
+    server: StubServer, env: dict[str, str], repo: Path, data_dir: Path, tmp_path: Path
+) -> None:
+    """A worktree's ``gitdir`` file edited on Windows (CRLF): git reads it
+    stripped, and so does the plugin."""
+    tree = tmp_path / "wt"
+    git(repo, "worktree", "add", "-q", str(tree))
+    [listed] = (repo / ".git" / "worktrees").glob("*/gitdir")
+    listed.write_bytes(listed.read_bytes().rstrip(b"\r\n") + b"\r\n")
+    _not_prompt_only(data_dir)
+
+    _turn(tree, env, tree / "app.py", "print('in the worktree')\n")
+
+    diffs = _diffs(server)
+    assert diffs and all(isinstance(d, str) and "+print('in the worktree')" in d for d in diffs)
+
+
 def test_worktree_file_naming_an_unregistered_worktree_gets_no_diff(
     server: StubServer, env: dict[str, str], repo: Path, data_dir: Path, tmp_path: Path
 ) -> None:

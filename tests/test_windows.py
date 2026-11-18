@@ -155,9 +155,9 @@ def test_read_control_without_posix_open_flags(
     symlinks and anything not a regular file before the open."""
     monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
     monkeypatch.delattr(os, "O_NONBLOCK", raising=False)
-    (tmp_path / "ok").write_text("../..\n")
+    (tmp_path / "ok").write_bytes(b"../..\n")  # write_text writes CRLF on Windows
     (tmp_path / "dir").mkdir()
-    (tmp_path / "big").write_text("x" * 5_000)
+    (tmp_path / "big").write_bytes(b"x" * 5_000)
 
     assert gitdiff._read_control(tmp_path / "ok") == (True, "../..\n")
     assert gitdiff._read_control(tmp_path / "missing") == (True, "")
@@ -177,8 +177,8 @@ def test_read_control_refuses_a_file_swapped_after_its_check(
     file must be the one that was checked."""
     monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
     monkeypatch.delattr(os, "O_NONBLOCK", raising=False)
-    (tmp_path / "ok").write_text("../..\n")
-    (tmp_path / "other").write_text("elsewhere\n")
+    (tmp_path / "ok").write_bytes(b"../..\n")
+    (tmp_path / "other").write_bytes(b"elsewhere\n")
     real_lstat = os.lstat
     monkeypatch.setattr(os, "lstat", lambda path: real_lstat(tmp_path / "other"))
 
@@ -198,7 +198,7 @@ def test_read_control_opens_in_binary_mode_where_there_is_one(
 
     monkeypatch.setattr(os, "O_BINARY", 0x8000, raising=False)
     monkeypatch.setattr(os, "open", opened)
-    (tmp_path / "ok").write_text("x\n")
+    (tmp_path / "ok").write_bytes(b"x\n")
 
     assert gitdiff._read_control(tmp_path / "ok") == (True, "x\n")
     assert flags and all(f & 0x8000 for f in flags)
@@ -559,3 +559,20 @@ def test_windows_job_that_cannot_take_git_is_closed_at_once(
     assert gitdiff.run_git(["rev-parse", "--is-inside-work-tree"], repo) is not None
     assert [name for name, _ in jobs.calls] == ["create", "assign", "close"]
     assert not gitdiff._JOB_OF
+
+
+@pytest.mark.parametrize("ending", ["\n", "\r\n"], ids=["lf", "crlf"])
+@pytest.mark.parametrize("posix_flags", [True, False], ids=["posix-open", "windows-open"])
+def test_read_control_returns_the_bytes_as_written(
+    ending: str, posix_flags: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No newline translation either way (O_BINARY on Windows): git writes
+    LF, a hand edit may leave CRLF, and the callers strip both."""
+    if not posix_flags:
+        monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+        monkeypatch.delattr(os, "O_NONBLOCK", raising=False)
+    elif not hasattr(os, "O_NOFOLLOW"):
+        pytest.skip("no O_NOFOLLOW here; the windows-open case covers this OS")
+    (tmp_path / "gitdir").write_bytes(f"C:/r/.git{ending}".encode())
+
+    assert gitdiff._read_control(tmp_path / "gitdir") == (True, f"C:/r/.git{ending}")

@@ -288,3 +288,65 @@ def test_adapter_never_blocks_at_the_end_of_a_turn(
     """Even if the core returned a block, Stop output is only a message."""
     monkeypatch.setattr(core, "after", lambda *args: core.Reply("x", True, False))
     assert json.loads(run_hook("after", stop_payload(project), env)) == {"systemMessage": "x"}
+
+
+# --- a test that hangs in a blocking call ends the run, naming itself ---------------------
+
+STUCK_TEST = """
+import time
+
+def test_stuck_in_a_blocking_call():
+    time.sleep(600)
+"""
+
+
+def test_a_hung_test_dumps_its_stack_and_ends_the_run(tmp_path: Path) -> None:
+    """The per-test timer can't interrupt a blocking call on Windows; the
+    faulthandler backstop can: past the hard limit it writes every thread's
+    stack to the hang log and exits non-zero, long before CI's job timeout."""
+    (tmp_path / "test_stuck.py").write_text(STUCK_TEST)
+    log = tmp_path / "hang.log"
+    tests = Path(__file__).resolve().parent
+    env = child_env(
+        {
+            "PYTHONPATH": os.pathsep.join(
+                [str(tests), str(tests.parent / "plugins/promptcoach/hooks")]
+            ),
+            "PROMPTCOACH_TEST_HARD_LIMIT_S": "2",
+            "PROMPTCOACH_HANG_LOG": str(log),
+        }
+    )
+    started = time.monotonic()
+    done = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-p",
+            "conftest",
+            "-p",
+            "no:cacheprovider",
+            "-o",
+            "addopts=",
+            "-q",
+            str(tmp_path / "test_stuck.py"),
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert done.returncode != 0
+    assert time.monotonic() - started < 30
+    text = log.read_text()
+    assert "running test_stuck.py::test_stuck_in_a_blocking_call" in text
+    assert "Timeout" in text and "test_stuck_in_a_blocking_call" in text.split("running", 2)[-1]
+
+
+def test_the_hard_limit_leaves_the_per_test_timer_to_act_first() -> None:
+    import conftest
+
+    assert conftest.HARD_LIMIT_S == conftest.TEST_TIMEOUT_S + 30

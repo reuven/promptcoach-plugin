@@ -157,7 +157,7 @@ def test_ci_gates_coverage_on_the_union_of_every_cell() -> None:
     # under its own name and uploading it even when a test failed.
     assert "COVERAGE_FILE: .coverage.${{ matrix.os }}-${{ matrix.python }}" in check
     [pytest_step] = re.findall(r"- run: (uv run pytest.*)", check)
-    assert pytest_step == "uv run pytest --cov-fail-under=0"
+    assert pytest_step == "uv run pytest -v --cov-fail-under=0"
     assert "runner.os" not in check and "matrix.os ==" not in check
     assert "continue-on-error" not in check
     assert re.search(r"actions/upload-artifact@[0-9a-f]{40}", check)
@@ -201,3 +201,19 @@ def test_coverage_paths_map_every_runner_to_the_repo() -> None:
 def test_local_runs_keep_the_100_percent_gate() -> None:
     pyproject = (ROOT / "pyproject.toml").read_text()
     assert "--cov-fail-under=100" in pyproject
+
+
+def test_ci_names_a_hung_test() -> None:
+    """A hang is self-reporting: -v prints each test before it runs, and the
+    conftest backstop's log (every thread's stack) is printed when a cell
+    fails, well inside the job's time limit."""
+    check = _ci_jobs()["check"]
+    assert "PROMPTCOACH_HANG_LOG: ${{ runner.temp }}/pytest-hang.log" in check
+    assert re.search(
+        r"if: \$\{\{ failure\(\) \}\}\n\s+shell: bash\n\s+run: .*pytest-hang\.log", check
+    )
+    import conftest
+
+    minutes = int(re.search(r"timeout-minutes: (\d+)", check).group(1))  # type: ignore[union-attr]
+    # Windows' suite takes about 5 minutes; one backstop adds HARD_LIMIT_S.
+    assert minutes * 60 >= 5 * 60 + conftest.HARD_LIMIT_S + 5 * 60
