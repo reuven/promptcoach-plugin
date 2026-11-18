@@ -671,7 +671,7 @@ def test_install_cleanup_runs_once(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(signal, "signal", lambda *a: installed.append(a))
     gitdiff.install_cleanup()
     gitdiff.install_cleanup()
-    assert installed == [gitdiff._kill_live, (signal.SIGTERM, gitdiff._on_term)]
+    assert installed == [gitdiff._exit_cleanup, (signal.SIGTERM, gitdiff._on_term)]
 
 
 def test_read_control_rejects_bytes_that_are_not_utf8(tmp_path: Path) -> None:
