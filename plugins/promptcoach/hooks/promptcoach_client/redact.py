@@ -40,19 +40,20 @@ REDACTED = "[REDACTED]"
 
 # Token shapes. Distinctive prefixes match anywhere, glued to anything
 # ("\\nsk-ant-...", "x_ghp_...", "1AKIA..."); short generic ones only where
-# no letter comes right before, so "task-management-..." isn't "sk-...".
-_NO_LETTER = r"(?<![A-Za-z])"
+# no letter comes right before, so "task-management-..." isn't "sk-...", or
+# right after an escape (a JSON string's "\\nsk-...").
+_NO_LETTER = r"(?:(?<![A-Za-z])|(?<=\\[nrt]))"
 # The lookahead skips, in one step, every position no token can start at.
 _TOKENS = re.compile(
     r"(?=[ABGaeghnprsxy])(?:"
     + "|".join(
         [
-            r"sk-ant-[A-Za-z0-9_-]{12,}",
+            r"sk-(?:ant|proj|svcacct|admin)-[A-Za-z0-9_-]{12,}",
             _NO_LETTER + r"sk-[A-Za-z0-9_-]{12,}",
             r"(?:ghp|gho|ghs|ghu|ghr)_[A-Za-z0-9]{20,}",
             r"github_pat_[A-Za-z0-9_]{20,}",
             r"xox[abp]-[A-Za-z0-9-]{10,}",
-            r"(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Z0-9])",
+            r"(?:AKIA|ASIA)[A-Z0-9]{16}",
             r"AIza[A-Za-z0-9_-]{30,}",
             r"glpat-[A-Za-z0-9_-]{20,}",
             _NO_LETTER + r"Bearer [A-Za-z0-9._~+/=-]{16,}",
@@ -66,16 +67,19 @@ _TOKENS = re.compile(
     + ")"
 )
 _CREDENTIAL_WORDS = r"(?:password|passwd|secret|token|api_?key)"
-# Command-line and markup forms: --password VALUE, mysql/docker login -p,
-# -u user:pass, <password>...</password>, key="DbPassword" value="...",
-# and login("user", "pass").
+# Command-line and markup forms: --password VALUE (--pass, --db-password,
+# --client-secret...), mysql/docker login/sshpass -p, -u user:pass,
+# htpasswd's password argument, <password>...</password>,
+# key="DbPassword" value="...", login("user", "pass"), and a quoted value
+# compared with a secret's name ("admin123" == password).
 # Each form with a literal it can't match without: a quick "in" check
 # skips the scan.
 _FORMS: list[tuple[str, re.Pattern[str]]] = [
     (
         "--",
         re.compile(
-            r"((?<![A-Za-z0-9_-])--(?:password|passwd|token|secret|api-key|api_key|apikey)"
+            r"((?<![A-Za-z0-9_-])--(?:[A-Za-z0-9]{1,20}[-_]){0,3}"
+            r"(?:password|passwd|pass|token|secret|api-key|api_key|apikey)"
             r"(?:=|[ \t]+))(?![-\s])\S+",
             re.IGNORECASE,
         ),
@@ -83,12 +87,22 @@ _FORMS: list[tuple[str, re.Pattern[str]]] = [
     (
         "-p",
         re.compile(
-            r"((?<![A-Za-z0-9_-])(?:mysql|mysqldump|mysqladmin|mariadb"
+            r"((?<![A-Za-z0-9_-])(?:mysql|mysqldump|mysqladmin|mariadb|sshpass"
             r"|(?:docker|podman)[ \t]+login)"
             r"(?:[ \t]+\S+){0,12}?[ \t]+-p[ \t]*)(?![-\s])\S+"
         ),
     ),
-    ("-u", re.compile(r"((?<![A-Za-z0-9_-])(?:-u|--user)[ \t]+[^\s:]{1,200}:)\S+")),
+    (
+        "-u",
+        re.compile(r"((?<![A-Za-z0-9_-])(?:-u[ \t]*|--user(?:=|[ \t]+))[^\s:]{1,200}:)\S+"),
+    ),
+    (
+        "htpasswd",
+        re.compile(
+            r"((?<![A-Za-z0-9_-])htpasswd(?:[ \t]+-[A-Za-z]{1,8}){1,4}"
+            r"[ \t]+[^\s-]\S*[ \t]+\S+[ \t]+)(?![-\s])\S+"
+        ),
+    ),
     (
         "</",
         re.compile(
@@ -115,6 +129,15 @@ _FORMS: list[tuple[str, re.Pattern[str]]] = [
             r"(?:\"[^\"\n]*\"|'[^'\n]*')"
         ),
     ),
+    (
+        "=",
+        re.compile(
+            r"()(?:\"[^\"\n]{1,200}\"|'[^'\n]{1,200}')"
+            r"(?P<tail>[ \t]{0,8}[!=]==?[ \t]{0,8}(?:[A-Za-z_][A-Za-z0-9_]{0,40}\.){0,4}"
+            r"[A-Za-z0-9_]{0,40}" + _CREDENTIAL_WORDS + r"[A-Za-z0-9_]{0,40}(?![A-Za-z0-9_]))",
+            re.IGNORECASE,
+        ),
+    ),
 ]
 # Kept: the header name and scheme. Gone: the credential after it.
 _AUTH = re.compile(
@@ -132,9 +155,10 @@ _KEY_BLOCK = re.compile(
 )
 # The end of a key whose start was cut off (a tail of command output).
 _KEY_END = re.compile(r"\A[A-Za-z0-9+/=\s]*-----END [A-Z0-9 ]{0,40}PRIVATE KEY-----")
-# The NAME of NAME=value or NAME: value, starting a word. Whether the name
-# says secret is checked on the (short) match, which keeps this linear.
-_NAME = re.compile(r"(?<![A-Za-z0-9_.-])([A-Za-z0-9_.-]{1,80})[\"']?[ \t]{0,8}([=:])")
+# The NAME of NAME=value, NAME: value or a comparison (NAME != value,
+# NAME <> value), starting a word. Whether the name says secret is checked
+# on the (short) match, which keeps this linear.
+_NAME = re.compile(r"(?<![A-Za-z0-9_.-])([A-Za-z0-9_.-]{1,80})[\"']?[ \t]{0,8}(!==?|<>|[=:])")
 # A name is split into parts (on _ - . and camelCase): a part from this list,
 # or api+key / private+key side by side, makes it a secret's name.
 _NAME_PART = re.compile(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|[0-9]+")
@@ -188,6 +212,13 @@ _COUNT_PARTS = frozenset(
         "thinking",
     }
 )
+# What a comparison may be kept for: a dotted name (token.OP) or a number
+# (0xF), with nothing glued after it (a call, a subscript, a string).
+_COMPARED = re.compile(
+    r"(?:[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+"
+    r"|[-+]?(?:0[xXoObB][0-9A-Fa-f_]+|[0-9][0-9_]*(?:\.[0-9]+)?))"
+    r"(?![A-Za-z0-9_.(\[\"'])"
+)
 _NUMBER = re.compile(r"[-+]?[0-9][0-9_]*(?:\.[0-9]+)?[,;)]?")
 _INDENT = re.compile(r"[ \t]*")
 _ANNOTATION = re.compile(r"[A-Za-z_][A-Za-z0-9_.]*(?:[ ]?[\[\]|,][ ]?[A-Za-z0-9_.]*)*[,;)]?")
@@ -228,14 +259,26 @@ _MARKERS = re.compile(
     r"os\.environ|dotenv_values|dotenv\s+list|compose\s+config|auth\s+token|get\s+secret"
     r"|export-credentials|gh/hosts\.yml|secrets\.ya?ml|/proc/\S*/environ|\bop\s+read\b"
     r"|find-(?:generic|internet)-password|\bsops\s+(?:-d|--decrypt)\b|credential\s+fill"
-    r"|print-access-token|get-access-token|get-session-token|heroku\s+config",
+    r"|print-access-token|get-access-token|get-session-token|heroku\s+config"
+    r"|aws\s+configure\s+get|\bvault\s+(?:read|kv\s+get)\b|config\s+view\s+--raw"
+    r"|doppler\s+secrets\s+download|auth\s+status\s+(?:--show-token|-t\b)",
     re.IGNORECASE,
 )
-# An inline script (python -c, ruby -e, node -e...) that names a secret
-# variable in quotes (os.getenv("OPENAI_API_KEY")) or reads Ruby's ENV.
-_SCRIPT_FLAG = re.compile(r"(?:^|\s)-[ce](?:\s|['\"])")
+# An interpreter's inline script (python -c, ruby -e, node -p, perl -le,
+# php -r, deno eval...) that dumps the environment (Ruby's or Perl's ENV,
+# process.env, getenv()) or looks a variable up (getenv, environ) with a
+# secret's name in quotes somewhere (os.getenv("OPENAI_API_KEY")). A quoted
+# name alone is a string, not a lookup: print("PASSWORD_RESET_TIMEOUT").
+_SCRIPT = re.compile(
+    r"(?<![A-Za-z0-9_.-])(?:python[0-9.]*|ruby|node|nodejs|perl|php|deno|bun)"
+    r"(?:[ \t]+-[A-Za-z]{1,4})*?[ \t]+(?:-[A-Za-z]{0,3}[ceEpr]|--eval|--print|eval)"
+    r"(?=[\s'\"]|\Z)"
+)
+_ENV_DUMP = re.compile(r"(?<![A-Za-z0-9_])ENV(?![A-Za-z0-9_])|process\.env|getenv\(\s*\)")
+_ENV_LOOKUP = re.compile(r"getenv|environ|Deno\.env")
 _QUOTED_UPPER = re.compile(r"[\"']([A-Z][A-Z0-9_]*)[\"']")
-_RUBY_ENV = re.compile(r"(?<![A-Za-z0-9_])ENV(?![A-Za-z0-9_])")
+# awk's environment array.
+_AWK_ENVIRON = re.compile(r"(?<![A-Za-z0-9_])ENVIRON(?![A-Za-z0-9_])")
 _GLOB = re.compile(r"[*?\[]")
 # Names a glob is tried against: one of each kind of credential file.
 _SAMPLES = (
@@ -269,10 +312,15 @@ def prints_secrets(command: str) -> bool:
     """
     if _MARKERS.search(command):
         return True
-    if _SCRIPT_FLAG.search(command) and (
-        _RUBY_ENV.search(command)
-        or any(_SECRET_VARIABLE.search(name) for name in _QUOTED_UPPER.findall(command))
+    if _SCRIPT.search(command) and (
+        _ENV_DUMP.search(command)
+        or (
+            _ENV_LOOKUP.search(command)
+            and any(_SECRET_VARIABLE.search(name) for name in _QUOTED_UPPER.findall(command))
+        )
     ):
+        return True
+    if "awk" in command and _AWK_ENVIRON.search(command):
         return True
     if any(_SECRET_VARIABLE.search(name) for name in _VARIABLE.findall(command)):
         return True
@@ -315,8 +363,10 @@ def _keeps_value(name: str, separator: str, after: str) -> bool:
     """True if the value after a secret name is code, not a secret: kept.
 
     Fails closed. An UPPER_CASE (environment-style) name always loses its
-    value. A ``//`` comment stays. In ``==`` and ``:=`` the value is what
-    follows (``password == "admin123"`` loses ``"admin123"``). Otherwise
+    value. A ``//`` comment stays. In ``==``, ``!=``, ``<>`` and ``:=`` the
+    value is what follows (``password == "admin123"`` loses ``"admin123"``);
+    a comparison with a dotted name or a number (``token.start ==
+    token.end``, ``token == 0x00``) stays. Otherwise
     the value stays only when it is a number or a type for a count of
     tokens (``max_tokens=1024``, ``num_tokens: int``), the name itself
     (``self.api_key = api_key``), or a call or subscript of plain names
@@ -327,9 +377,11 @@ def _keeps_value(name: str, separator: str, after: str) -> bool:
         return False
     if after.lstrip().startswith("//"):
         return True
-    if after.startswith("="):  # == compares, := assigns: judge what follows
-        after = after[1:]
+    compares = separator in ("!=", "!==", "<>") or (separator == "=" and after.startswith("="))
+    after = after.lstrip("=")  # == and === compare, := assigns: judge what follows
     value = after.strip()
+    if compares and _COMPARED.match(value):
+        return True
     parts = _parts(name)
     if parts and parts[-1] == "tokens" and all(p in _COUNT_PARTS for p in parts[:-1]):
         annotation = value.split("=", 1)[0].strip()
@@ -382,8 +434,8 @@ def redact(text: str) -> str:
         end = text.find("\n", match.end())
         end = len(text) if end < 0 else end
         after = text[match.end() : min(end, match.end() + _VALUE_LOOK)]
-        if after.strip():
-            too_long = end - match.end() > _VALUE_LOOK  # can't judge it all: redact
+        too_long = end - match.end() > _VALUE_LOOK  # can't judge it all: redact
+        if too_long or after.strip():
             if too_long or not _keeps_value(match[1], match[2], after):
                 out += [text[done : match.end()], REDACTED]
                 done = end
