@@ -220,6 +220,19 @@ def _check_survivors(session: pytest.Session) -> None:
     session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
 
+# A long string parameter becomes its head and length in the test's id.
+# pytest 8 (the last for Python 3.9) used the whole string, and the 1 MB ids
+# that made hung GitHub's log for minutes (see test_every_test_id_is_short).
+_ID_HEAD_CHARS = 40
+
+
+def pytest_make_parametrize_id(config: pytest.Config, val: object, argname: str) -> str | None:
+    if isinstance(val, str) and len(val) > _ID_HEAD_CHARS:
+        head = val[:_ID_HEAD_CHARS].encode("unicode_escape").decode("ascii")
+        return f"{head}...{len(val)}chars"
+    return None
+
+
 def pytest_sessionfinish(session: pytest.Session) -> None:
     _arm("session finishing")
     _check_survivors(session)

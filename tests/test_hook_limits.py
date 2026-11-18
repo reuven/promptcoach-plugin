@@ -444,3 +444,14 @@ def test_survivor_rows_are_never_cut_to_the_terminal_width() -> None:
     import conftest
 
     assert "-ww" in conftest.PS_ARGV
+
+
+def test_a_long_string_parameter_gets_a_short_id() -> None:
+    import conftest
+
+    assert conftest.pytest_make_parametrize_id(None, "short", "x") is None  # type: ignore[arg-type]
+    assert conftest.pytest_make_parametrize_id(None, 5, "x") is None  # type: ignore[arg-type]
+    long_id = conftest.pytest_make_parametrize_id(None, "ab\n" * 100, "x")  # type: ignore[arg-type]
+    assert (
+        long_id == "ab\\nab\\nab\\nab\\nab\\nab\\nab\\nab\\nab\\nab\\nab\\nab\\nab\\na...300chars"
+    )
