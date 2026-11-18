@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import _thread
+import atexit
 import contextlib
 import faulthandler
 import io
@@ -16,7 +17,7 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import IO, Any
+from typing import Any
 
 import pytest
 from hypothesis import settings
@@ -94,46 +95,63 @@ def interrupt_after(seconds: float) -> Iterator[None]:
 
 
 # The backstop behind TEST_TIMEOUT_S. On Windows the per-test timer can't
-# interrupt a blocking call (a pipe read, a wait), so a hung test would hold
-# the run until CI's job timeout, which keeps no log. Past HARD_LIMIT_S,
-# faulthandler writes every thread's stack to the hang log and exits the run
-# non-zero. A file, not stderr: pytest captures stderr, and exiting loses it.
-# Each test's name goes in first, so the log says which one hung.
+# interrupt a blocking call (a pipe read, a wait), and nothing times a hang
+# outside a test (collection, between tests, the session's end, or Python
+# waiting at exit for a thread nobody stopped). So one faulthandler watchdog
+# stays armed from configure to the process's exit, re-armed at each step:
+# past HARD_LIMIT_S without one, it writes every thread's stack to the hang
+# log and exits the run non-zero, long before CI's step timeout. Each step's
+# name goes in first, so the log says where it hung. A raw file descriptor,
+# not stderr (pytest captures it, and exiting loses it) and not a file
+# object (it must stay open, unflushed writes and all, until the very end).
 HARD_LIMIT_S = float(os.environ.get("PROMPTCOACH_TEST_HARD_LIMIT_S", TEST_TIMEOUT_S + 30))
 HANG_LOG = Path(
     os.environ.get("PROMPTCOACH_HANG_LOG")
     or Path(tempfile.gettempdir()) / f"promptcoach-pytest-hang-{os.getpid()}.log"
 )
-_HANG_FILES: list[IO[str]] = []
+_HANG_FD: list[int] = []
 
 
-def _hang_file() -> IO[str]:
-    if not _HANG_FILES:
-        _HANG_FILES.append(HANG_LOG.open("w", encoding="utf-8"))
-    return _HANG_FILES[0]
+def _arm(step: str) -> None:
+    """Note ``step`` in the hang log and restart the watchdog's clock."""
+    if not _HANG_FD:
+        _HANG_FD.append(os.open(HANG_LOG, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644))
+        atexit.register(_disarm)
+    os.write(_HANG_FD[0], f"{step}\n".encode())
+    faulthandler.dump_traceback_later(HARD_LIMIT_S, exit=True, file=_HANG_FD[0])
 
 
-def pytest_unconfigure(config: pytest.Config) -> None:
-    """The run ended without a hang: close the log, and drop it unless CI
-    asked for it. (After a hang the process is gone and the log stays.)"""
-    for log in _HANG_FILES:
-        log.close()
-    _HANG_FILES.clear()
+def _disarm() -> None:
+    """At exit, after Python has joined every thread: no hang, so stop the
+    watchdog and drop the log unless CI asked for it."""
+    faulthandler.cancel_dump_traceback_later()
+    for fd in _HANG_FD:
+        os.close(fd)
+    _HANG_FD.clear()
     if not os.environ.get("PROMPTCOACH_HANG_LOG"):
         with contextlib.suppress(OSError):
             HANG_LOG.unlink()
 
 
+def pytest_configure(config: pytest.Config) -> None:
+    _arm("collecting")
+
+
+def pytest_sessionfinish(session: pytest.Session) -> None:
+    _arm("session finishing")
+
+
+def pytest_unconfigure(config: pytest.Config) -> None:
+    _arm("exiting")
+
+
 @pytest.fixture(autouse=True)
 def _hard_limit(request: pytest.FixtureRequest) -> Iterator[None]:
-    log = _hang_file()
-    log.write(f"running {request.node.nodeid}\n")
-    log.flush()
-    faulthandler.dump_traceback_later(HARD_LIMIT_S, exit=True, file=log)
+    _arm(f"running {request.node.nodeid}")
     try:
         yield
     finally:
-        faulthandler.cancel_dump_traceback_later()
+        _arm(f"after {request.node.nodeid}")
 
 
 @pytest.fixture(autouse=True)
