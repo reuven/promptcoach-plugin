@@ -65,7 +65,8 @@ before anything leaves your machine. A command that reads a credential file
 (`cat .env`, `source .env`, `< .env`, or a pattern such as `.env*` that could
 match one), expands a secret-named variable (`echo $OPENAI_API_KEY`), prints
 the environment (`env`, `printenv`, `export -p`, `os.environ`, an inline
-`python -c`, `node -p` or `perl -e` script that reads it) or asks a tool for a
+`python -c`, `node -p` or `perl -e` script that reads it or names a secret
+in quotes) or asks a tool for a
 secret (`gh auth token`, `kubectl get secret`, `docker compose config`,
 `aws configure get`, `vault read`) has its output dropped. Well-known token shapes (`sk-...`, `ghp_...`,
 `AKIA...`, `sk_live_...`, `hf_...`, JWTs, `Authorization:` headers, the
@@ -79,7 +80,7 @@ replaced with `[REDACTED]` in commands, output, replies and diffs. Only a few
 plain code forms are left alone: a token count (`max_tokens=1024`), a name
 assigned to itself (`self.api_key = api_key`), a call or lookup
 (`password = get_password()`, `os.environ["TOKEN"]`) and a comparison with a
-dotted name or a number (`token.start == token.end`); an `UPPER_CASE` name
+dotted name (`token.start == token.end`); an `UPPER_CASE` name
 always loses its value. The server scrubs secrets again from everything it stores. This is a
 filter for the usual cases, not a guarantee: a secret in an unusual shape, or
 a command that hides what it reads (`eval`, a file name built from pieces or

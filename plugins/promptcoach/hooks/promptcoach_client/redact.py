@@ -212,14 +212,11 @@ _COUNT_PARTS = frozenset(
         "thinking",
     }
 )
-# What a comparison may be kept for: a dotted name (token.OP) or a number
-# (0xF), with nothing glued after it (a call, a subscript, a string).
-_COMPARED = re.compile(
-    r"(?:[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+"
-    r"|[-+]?(?:0[xXoObB][0-9A-Fa-f_]+|[0-9][0-9_]*(?:\.[0-9]+)?))"
-    r"(?![A-Za-z0-9_.(\[\"'])"
-)
-_NUMBER = re.compile(r"[-+]?[0-9][0-9_]*(?:\.[0-9]+)?[,;)]?")
+# What a comparison may be kept for: its whole value one dotted name
+# (token.OP, tokenize.NAME), at most a ")", ":" or "," after it. A number is
+# judged like any value (password == 1234 is a PIN).
+_COMPARED = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+[):,]?")
+_NUMBER = re.compile(r"[-+]?[0-9][0-9_]*(?:\.[0-9]+)?[,;):]?")
 _INDENT = re.compile(r"[ \t]*")
 _ANNOTATION = re.compile(r"[A-Za-z_][A-Za-z0-9_.]*(?:[ ]?[\[\]|,][ ]?[A-Za-z0-9_.]*)*[,;)]?")
 _IDENTIFIER = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)[,;)]?")
@@ -265,17 +262,16 @@ _MARKERS = re.compile(
     re.IGNORECASE,
 )
 # An interpreter's inline script (python -c, ruby -e, node -p, perl -le,
-# php -r, deno eval...) that dumps the environment (Ruby's or Perl's ENV,
-# process.env, getenv()) or looks a variable up (getenv, environ) with a
-# secret's name in quotes somewhere (os.getenv("OPENAI_API_KEY")). A quoted
-# name alone is a string, not a lookup: print("PASSWORD_RESET_TIMEOUT").
+# php -r, deno eval...) that names a secret in quotes anywhere
+# (os.getenv("OPENAI_API_KEY"), even print("PASSWORD_RESET_TIMEOUT"): fail
+# closed) or dumps the environment (Ruby's or Perl's ENV, process.env,
+# getenv()).
 _SCRIPT = re.compile(
     r"(?<![A-Za-z0-9_.-])(?:python[0-9.]*|ruby|node|nodejs|perl|php|deno|bun)"
     r"(?:[ \t]+-[A-Za-z]{1,4})*?[ \t]+(?:-[A-Za-z]{0,3}[ceEpr]|--eval|--print|eval)"
     r"(?=[\s'\"]|\Z)"
 )
 _ENV_DUMP = re.compile(r"(?<![A-Za-z0-9_])ENV(?![A-Za-z0-9_])|process\.env|getenv\(\s*\)")
-_ENV_LOOKUP = re.compile(r"getenv|environ|Deno\.env")
 _QUOTED_UPPER = re.compile(r"[\"']([A-Z][A-Z0-9_]*)[\"']")
 # awk's environment array.
 _AWK_ENVIRON = re.compile(r"(?<![A-Za-z0-9_])ENVIRON(?![A-Za-z0-9_])")
@@ -314,10 +310,7 @@ def prints_secrets(command: str) -> bool:
         return True
     if _SCRIPT.search(command) and (
         _ENV_DUMP.search(command)
-        or (
-            _ENV_LOOKUP.search(command)
-            and any(_SECRET_VARIABLE.search(name) for name in _QUOTED_UPPER.findall(command))
-        )
+        or any(_SECRET_VARIABLE.search(name) for name in _QUOTED_UPPER.findall(command))
     ):
         return True
     if "awk" in command and _AWK_ENVIRON.search(command):
@@ -365,8 +358,8 @@ def _keeps_value(name: str, separator: str, after: str) -> bool:
     Fails closed. An UPPER_CASE (environment-style) name always loses its
     value. A ``//`` comment stays. In ``==``, ``!=``, ``<>`` and ``:=`` the
     value is what follows (``password == "admin123"`` loses ``"admin123"``);
-    a comparison with a dotted name or a number (``token.start ==
-    token.end``, ``token == 0x00``) stays. Otherwise
+    a comparison whose whole value is a dotted name (``token.start ==
+    token.end``) stays. Otherwise
     the value stays only when it is a number or a type for a count of
     tokens (``max_tokens=1024``, ``num_tokens: int``), the name itself
     (``self.api_key = api_key``), or a call or subscript of plain names
@@ -380,7 +373,7 @@ def _keeps_value(name: str, separator: str, after: str) -> bool:
     compares = separator in ("!=", "!==", "<>") or (separator == "=" and after.startswith("="))
     after = after.lstrip("=")  # == and === compare, := assigns: judge what follows
     value = after.strip()
-    if compares and _COMPARED.match(value):
+    if compares and _COMPARED.fullmatch(value):
         return True
     parts = _parts(name)
     if parts and parts[-1] == "tokens" and all(p in _COUNT_PARTS for p in parts[:-1]):
