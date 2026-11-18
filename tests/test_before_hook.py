@@ -450,3 +450,127 @@ def test_no_local_block_for_an_agent_that_cannot_block(env: dict[str, str], proj
     config = claude_code.config_from_env(env)
 
     assert core.before(event, config, profile) is None
+
+
+# --- a coach command never reaches the agent, whatever the server replies -----------------
+
+# The server's non-blocking replies (PromptCoach-v1 api.py): the pool-timeout and
+# rate-limit quiet replies, and the sign-in and lapsed messages.
+SIGN_IN = (
+    "Prompt coach: sign in at https://coach.lernerpython.com/signin to get your token, "
+    "and coaching will start right away."
+)
+LAPSED = (
+    "Prompt coach: your LernerPython membership isn't active right now. "
+    "Renew at https://lernerpython.com and coaching picks right back up."
+)
+NON_BLOCKING = {
+    "quiet_pool_timeout": {"message": None, "block_prompt": False, "prompt_only": True},
+    "rate_limited": {"message": None, "block_prompt": False, "prompt_only": False},
+    "sign_in": {"message": SIGN_IN, "block_prompt": False, "prompt_only": True},
+    "lapsed": {"message": LAPSED, "block_prompt": False, "prompt_only": True},
+}
+NO_TOKEN_REASON = (
+    "Coach: that command wasn't applied, because the coach isn't set up yet. "
+    "Add your token with /plugin → promptcoach → Configure, then send it again."
+)
+
+
+@pytest.mark.parametrize("kind", sorted(NON_BLOCKING))
+def test_command_with_a_non_blocking_reply_is_blocked(
+    kind: str, server: StubServer, env: dict[str, str], repo: Path, data_dir: Path
+) -> None:
+    """The server's own message is the reason when it has one, so it isn't hidden."""
+    server.reply = NON_BLOCKING[kind]
+
+    out = json.loads(run_hook("before", prompt_payload(repo, "coach, quieter"), env))
+
+    assert out == {"decision": "block", "reason": server.reply["message"] or REASON}
+    # A real reply: its setting is still remembered. A blocked prompt keeps no snapshot.
+    state = json.loads((data_dir / "state.json").read_text())
+    assert state["prompt_only"] is server.reply["prompt_only"]
+    assert not list(data_dir.glob("snap-*"))
+
+
+@pytest.mark.parametrize("kind", sorted(NON_BLOCKING))
+def test_ordinary_prompt_with_a_non_blocking_reply_is_unchanged(
+    kind: str, server: StubServer, env: dict[str, str], project: Path
+) -> None:
+    server.reply = NON_BLOCKING[kind]
+    message = server.reply["message"]
+
+    out = run_hook("before", prompt_payload(project, "add a test"), env)
+
+    assert out == (json.dumps({"systemMessage": message}) if message else "")
+
+
+@pytest.mark.parametrize("prompt", COMMAND_PROMPTS)
+def test_command_without_a_token_is_blocked(
+    prompt: str, server: StubServer, env: dict[str, str], project: Path
+) -> None:
+    del env["CLAUDE_PLUGIN_OPTION_TOKEN"]
+
+    out = run_hook("before", prompt_payload(project, prompt), env)
+
+    assert json.loads(out) == {"decision": "block", "reason": NO_TOKEN_REASON}
+    assert " ".join(prompt.split()).lower() not in out.lower()
+    assert server.requests == []  # no token, no network
+
+
+def test_command_without_a_token_leaves_the_setup_warning_for_later(
+    server: StubServer, env: dict[str, str], project: Path
+) -> None:
+    """The block isn't the once-a-session warning: the next prompt still gets that."""
+    del env["CLAUDE_PLUGIN_OPTION_TOKEN"]
+
+    run_hook("before", prompt_payload(project, "coach, quieter"), env)
+    out = run_hook("before", prompt_payload(project, "add a test", prompt_id="prompt-2"), env)
+
+    assert json.loads(out) == {"systemMessage": PROFILE.missing_token_message}
+
+
+def test_command_without_a_token_or_data_dir_is_blocked(env: dict[str, str], project: Path) -> None:
+    del env["CLAUDE_PLUGIN_OPTION_TOKEN"]
+    del env["CLAUDE_PLUGIN_DATA"]
+
+    out = json.loads(run_hook("before", prompt_payload(project, "coach, quieter"), env))
+
+    assert out == {"decision": "block", "reason": NO_TOKEN_REASON}
+
+
+@pytest.mark.parametrize("prompt", ORDINARY_PROMPTS)
+def test_ordinary_prompt_without_a_token_is_unchanged(
+    prompt: str, env: dict[str, str], project: Path
+) -> None:
+    del env["CLAUDE_PLUGIN_OPTION_TOKEN"]
+
+    out = run_hook("before", prompt_payload(project, prompt), env)
+
+    assert json.loads(out) == {"systemMessage": PROFILE.missing_token_message}
+
+
+@pytest.mark.parametrize("kind", sorted(NON_BLOCKING))
+def test_no_block_for_an_agent_that_cannot_block_whatever_the_reply(
+    kind: str, server: StubServer, env: dict[str, str], project: Path
+) -> None:
+    server.reply = NON_BLOCKING[kind]
+    profile = dataclasses.replace(
+        PROFILE, capabilities=core.Capabilities(False, has_reply=True, has_exit_codes=True)
+    )
+    event = core.PromptSubmitted("sess-1", "prompt-1", "coach, quieter", project, project)
+
+    reply = core.before(event, claude_code.config_from_env(env), profile)
+
+    assert reply is None or not reply.block
+
+
+def test_no_token_block_needs_an_agent_that_can_block(env: dict[str, str], project: Path) -> None:
+    del env["CLAUDE_PLUGIN_OPTION_TOKEN"]
+    profile = dataclasses.replace(
+        PROFILE, capabilities=core.Capabilities(False, has_reply=True, has_exit_codes=True)
+    )
+    event = core.PromptSubmitted("sess-1", "prompt-1", "coach, quieter", project, project)
+
+    reply = core.before(event, claude_code.config_from_env(env), profile)
+
+    assert reply == core.Reply(PROFILE.missing_token_message, False, True)

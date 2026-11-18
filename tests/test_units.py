@@ -80,6 +80,7 @@ def _profile(**changes: Any) -> core.AgentProfile:
         {"agent": "vim"},
         {"plugin_version": "1.0"},
         {"missing_token_message": ""},
+        {"command_without_token_message": ""},
         {"sources": dataclasses.replace(PROFILE.sources, project_instruction_files=("x.md",))},
         {"sources": dataclasses.replace(PROFILE.sources, global_instruction_files=("~/x.md",))},
     ],
