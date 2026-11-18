@@ -1,16 +1,50 @@
 {
   "hooks": {
     "UserPromptSubmit": [
-      {"hooks": [{"type": "command", "command": "python3", "args": ["-I", "${CLAUDE_PLUGIN_ROOT}/hooks/coach_hook.py", "before"], "timeout": 3}]}
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "exec sh -c 'case \"$OSTYPE\" in msys*|cygwin*) c=\"py python3 python\";; *) c=\"python3\";; esac; for p in $c; do w=$(command -v \"$p\") || continue; case \"$w\" in *WindowsApps*) continue;; esac; if [ \"$p\" = py ]; then exec py -3 -I \"$0\" \"$1\"; fi; exec \"$p\" -I \"$0\" \"$1\"; done; exit 0' \"${CLAUDE_PLUGIN_ROOT}/hooks/coach_hook.py\" before\nforeach ($n in 'py', 'python3', 'python') { $c = Get-Command $n -CommandType Application -ErrorAction SilentlyContinue | Where-Object { $_.Source -notlike '*\\WindowsApps\\*' } | Select-Object -First 1; if ($c) { if ($n -eq 'py') { & $c.Source -3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/coach_hook.py\" before } else { & $c.Source -I \"${CLAUDE_PLUGIN_ROOT}/hooks/coach_hook.py\" before }; exit 0 } }; exit 0",
+            "timeout": 3
+          }
+        ]
+      }
     ],
     "PostToolUse": [
-      {"matcher": "Bash", "hooks": [{"type": "command", "command": "python3", "args": ["-I", "${CLAUDE_PLUGIN_ROOT}/hooks/coach_hook.py", "record"], "timeout": 2}]}
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "exec sh -c 'case \"$OSTYPE\" in msys*|cygwin*) c=\"py python3 python\";; *) c=\"python3\";; esac; for p in $c; do w=$(command -v \"$p\") || continue; case \"$w\" in *WindowsApps*) continue;; esac; if [ \"$p\" = py ]; then exec py -3 -I \"$0\" \"$1\"; fi; exec \"$p\" -I \"$0\" \"$1\"; done; exit 0' \"${CLAUDE_PLUGIN_ROOT}/hooks/coach_hook.py\" record\nforeach ($n in 'py', 'python3', 'python') { $c = Get-Command $n -CommandType Application -ErrorAction SilentlyContinue | Where-Object { $_.Source -notlike '*\\WindowsApps\\*' } | Select-Object -First 1; if ($c) { if ($n -eq 'py') { & $c.Source -3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/coach_hook.py\" record } else { & $c.Source -I \"${CLAUDE_PLUGIN_ROOT}/hooks/coach_hook.py\" record }; exit 0 } }; exit 0",
+            "timeout": 2
+          }
+        ]
+      }
     ],
     "PostToolUseFailure": [
-      {"matcher": "Bash", "hooks": [{"type": "command", "command": "python3", "args": ["-I", "${CLAUDE_PLUGIN_ROOT}/hooks/coach_hook.py", "record"], "timeout": 2}]}
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "exec sh -c 'case \"$OSTYPE\" in msys*|cygwin*) c=\"py python3 python\";; *) c=\"python3\";; esac; for p in $c; do w=$(command -v \"$p\") || continue; case \"$w\" in *WindowsApps*) continue;; esac; if [ \"$p\" = py ]; then exec py -3 -I \"$0\" \"$1\"; fi; exec \"$p\" -I \"$0\" \"$1\"; done; exit 0' \"${CLAUDE_PLUGIN_ROOT}/hooks/coach_hook.py\" record\nforeach ($n in 'py', 'python3', 'python') { $c = Get-Command $n -CommandType Application -ErrorAction SilentlyContinue | Where-Object { $_.Source -notlike '*\\WindowsApps\\*' } | Select-Object -First 1; if ($c) { if ($n -eq 'py') { & $c.Source -3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/coach_hook.py\" record } else { & $c.Source -I \"${CLAUDE_PLUGIN_ROOT}/hooks/coach_hook.py\" record }; exit 0 } }; exit 0",
+            "timeout": 2
+          }
+        ]
+      }
     ],
     "Stop": [
-      {"hooks": [{"type": "command", "command": "python3", "args": ["-I", "${CLAUDE_PLUGIN_ROOT}/hooks/coach_hook.py", "after"], "timeout": 15}]}
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "exec sh -c 'case \"$OSTYPE\" in msys*|cygwin*) c=\"py python3 python\";; *) c=\"python3\";; esac; for p in $c; do w=$(command -v \"$p\") || continue; case \"$w\" in *WindowsApps*) continue;; esac; if [ \"$p\" = py ]; then exec py -3 -I \"$0\" \"$1\"; fi; exec \"$p\" -I \"$0\" \"$1\"; done; exit 0' \"${CLAUDE_PLUGIN_ROOT}/hooks/coach_hook.py\" after\nforeach ($n in 'py', 'python3', 'python') { $c = Get-Command $n -CommandType Application -ErrorAction SilentlyContinue | Where-Object { $_.Source -notlike '*\\WindowsApps\\*' } | Select-Object -First 1; if ($c) { if ($n -eq 'py') { & $c.Source -3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/coach_hook.py\" after } else { & $c.Source -I \"${CLAUDE_PLUGIN_ROOT}/hooks/coach_hook.py\" after }; exit 0 } }; exit 0",
+            "timeout": 15
+          }
+        ]
+      }
     ]
   }
 }
