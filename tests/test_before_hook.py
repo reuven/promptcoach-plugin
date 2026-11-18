@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import socket
 import time
@@ -9,8 +10,15 @@ from pathlib import Path
 
 import pytest
 
-from conftest import TOKEN, StubServer, prompt_payload, run_hook
-from promptcoach_client import core
+from conftest import (
+    COMMAND_PROMPTS,
+    ORDINARY_PROMPTS,
+    TOKEN,
+    StubServer,
+    prompt_payload,
+    run_hook,
+)
+from promptcoach_client import claude_code, core
 from promptcoach_client.claude_code import PROFILE
 from promptcoach_client.setup_scan import SetupSources, collect_setup, gitignore_covers_env
 
@@ -328,3 +336,117 @@ def test_blank_token_counts_as_missing(
 
     assert "add your token" in run_hook("before", prompt_payload(project), env)
     assert server.requests == []
+
+
+# --- a coach command fails closed when the server doesn't answer --------------------------
+
+# Every way /v1/before can end with no usable reply: (stub mode, HTTP status).
+NO_ANSWER = {
+    "client_timeout": ("sleep", 200),
+    "network_error": ("refused", 200),
+    "status_500": ("status", 500),
+    "status_503": ("status", 503),
+    "malformed_json": ("raw", 200),
+    "not_an_object": ("not_object", 200),
+    "not_a_coach_reply": ("not_reply", 200),
+    "not_http": ("badstatus", 200),
+    "trickle": ("trickle", 200),
+    "redirect": ("redirect", 200),
+}
+
+
+def _no_answer(kind: str, server: StubServer, env: dict[str, str]) -> None:
+    """Make the stub (or the URL) fail the way ``kind`` names."""
+    mode, server.status = NO_ANSWER[kind]
+    if mode == "refused":
+        env["CLAUDE_PLUGIN_OPTION_SERVER_URL"] = _refused_url()
+    elif mode == "not_object":
+        server.mode, server.raw = "raw", b"[1, 2]"
+    elif mode == "not_reply":  # a block with no message: parse_reply refuses it
+        server.reply = {"message": None, "block_prompt": True, "prompt_only": False}
+    else:
+        server.mode, server.raw = mode, b"{not json"
+
+
+# The whole reason, fixed: what happened and what to do, in the server's voice
+# (its own COMMAND_RETRY). Nothing the person typed, and no token.
+REASON = "Coach: I didn't answer in time, so that command wasn't applied. Please send it again."
+NOT_ANSWERED = {"decision": "block", "reason": REASON}
+
+
+@pytest.mark.parametrize("kind", sorted(NO_ANSWER))
+def test_command_is_blocked_when_the_server_does_not_answer(
+    kind: str, server: StubServer, env: dict[str, str], repo: Path, data_dir: Path
+) -> None:
+    """The command was not applied, so it must not reach Claude as a prompt."""
+    data_dir.mkdir()
+    (data_dir / "state.json").write_text('{"prompt_only": false}')
+    _no_answer(kind, server, env)
+
+    started = time.monotonic()
+    out = run_hook("before", prompt_payload(repo, "coach, quieter"), env)
+    elapsed = time.monotonic() - started
+
+    assert json.loads(out) == NOT_ANSWERED
+    assert elapsed < core.BEFORE_BUDGET_S
+    # A local block says nothing about the server's setting, and keeps no
+    # snapshot: the prompt never reaches Claude, so no turn follows.
+    assert json.loads((data_dir / "state.json").read_text()) == {"prompt_only": False}
+    assert not list(data_dir.glob("snap-*"))
+
+
+@pytest.mark.parametrize("kind", sorted(NO_ANSWER))
+def test_ordinary_prompt_still_passes_when_the_server_does_not_answer(
+    kind: str, server: StubServer, env: dict[str, str], project: Path, data_dir: Path
+) -> None:
+    _no_answer(kind, server, env)
+
+    assert run_hook("before", prompt_payload(project, "add a test"), env) == ""
+    assert not (data_dir / "state.json").exists()
+
+
+@pytest.mark.parametrize("prompt", COMMAND_PROMPTS)
+def test_every_command_form_fails_closed(prompt: str, env: dict[str, str], project: Path) -> None:
+    env["CLAUDE_PLUGIN_OPTION_SERVER_URL"] = _refused_url()
+
+    assert json.loads(run_hook("before", prompt_payload(project, prompt), env)) == NOT_ANSWERED
+
+
+@pytest.mark.parametrize("prompt", ORDINARY_PROMPTS)
+def test_a_near_miss_is_not_blocked_locally(
+    prompt: str, env: dict[str, str], project: Path
+) -> None:
+    env["CLAUDE_PLUGIN_OPTION_SERVER_URL"] = _refused_url()
+
+    assert run_hook("before", prompt_payload(project, prompt), env) == ""
+
+
+@pytest.mark.parametrize("prompt", COMMAND_PROMPTS)
+def test_the_local_block_echoes_nothing(prompt: str, env: dict[str, str], project: Path) -> None:
+    env["CLAUDE_PLUGIN_OPTION_SERVER_URL"] = _refused_url()
+
+    out = run_hook("before", prompt_payload(project, prompt), env)
+
+    assert json.loads(out)["reason"] == REASON
+    assert TOKEN not in out
+    assert " ".join(prompt.split()).lower() not in out.lower()
+
+
+def test_a_server_block_still_wins(server: StubServer, env: dict[str, str], project: Path) -> None:
+    server.reply = {"message": "Coach: quieter now.", "block_prompt": True, "prompt_only": False}
+
+    out = json.loads(run_hook("before", prompt_payload(project, "coach, quieter"), env))
+
+    assert out == {"decision": "block", "reason": "Coach: quieter now."}
+
+
+def test_no_local_block_for_an_agent_that_cannot_block(env: dict[str, str], project: Path) -> None:
+    """An agent that can't keep a prompt back gets no block it couldn't honor."""
+    env["CLAUDE_PLUGIN_OPTION_SERVER_URL"] = _refused_url()
+    profile = dataclasses.replace(
+        PROFILE, capabilities=core.Capabilities(False, has_reply=True, has_exit_codes=True)
+    )
+    event = core.PromptSubmitted("sess-1", "prompt-1", "coach, quieter", project, project)
+    config = claude_code.config_from_env(env)
+
+    assert core.before(event, config, profile) is None
