@@ -172,12 +172,12 @@ def test_round4_false_positives_stay(command: str) -> None:
 
 
 def _fastest(text: str) -> float:
-    """The best of three timings of ``redact(text)``, the line tracer paused."""
+    """The best of five timings of ``redact(text)``, the line tracer paused."""
     tracer = sys.gettrace()
     sys.settrace(None)
     try:
         times = []
-        for _ in range(3):
+        for _ in range(5):
             started = time.perf_counter()
             redact(text)
             times.append(time.perf_counter() - started)
@@ -187,12 +187,14 @@ def _fastest(text: str) -> float:
 
 
 def test_empty_yaml_keys_take_linear_time() -> None:
-    """Four times the ``password:`` lines take about four times as long, not
-    sixteen: a ratio, so a loaded machine slows both sides alike."""
+    """Eight times the ``password:`` lines take about eight times as long, not
+    sixty-four: a ratio, so a loaded machine slows both sides alike. Measured
+    (probes/plugin/fix4/out/p34c_ratio8x.txt): linear code stays under 22 even
+    with 48 CPU burners on 24 cores; the quadratic mutant is at 35 or more."""
     redact("password:\n" * 100)  # warm the caches
-    small = _fastest("password:\n" * 7_500)
-    large = _fastest("password:\n" * 30_000)
-    assert large < 8 * small
+    small = _fastest("password:\n" * 5_000)
+    large = _fastest("password:\n" * 40_000)
+    assert large < 30 * small
 
 
 SLOW_IMPORT = """
