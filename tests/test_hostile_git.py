@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 import subprocess
 import time
 from pathlib import Path
@@ -62,7 +63,11 @@ def test_partial_clone_never_fetches(
     git(repo, "add", "f.txt")
     git(repo, "commit", "-q", "-m", "f")
     blob = git(repo, "rev-parse", "HEAD:f.txt").strip()
-    (repo / ".git" / "objects" / blob[:2] / blob[2:]).unlink()
+    loose = repo / ".git" / "objects" / blob[:2] / blob[2:]
+    loose.chmod(
+        stat.S_IWRITE | stat.S_IREAD
+    )  # git writes objects read-only; Windows won't unlink that
+    loose.unlink()
     for key, value in [
         ("core.repositoryformatversion", "1"),
         ("extensions.partialClone", "origin"),

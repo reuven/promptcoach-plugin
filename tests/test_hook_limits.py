@@ -21,6 +21,7 @@ from conftest import (
     ORDINARY_PROMPTS,
     TOKEN,
     StubServer,
+    child_env,
     posix_only,
     prompt_payload,
     run_hook,
@@ -157,7 +158,7 @@ def test_bad_status_line_leaves_stderr_empty(
         input=json.dumps(prompt_payload(project)),
         capture_output=True,
         text=True,
-        env={"PATH": os.environ["PATH"], **env},
+        env=child_env(env),
         timeout=10,
         check=False,
     )

@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import StubServer, posix_only, prompt_payload
+from conftest import StubServer, child_env, posix_only, prompt_payload
 from promptcoach_client import gitdiff
 from promptcoach_client.redact import prints_secrets, redact
 
@@ -221,7 +221,7 @@ def test_before_budget_counts_from_the_process_start(
         input=json.dumps(prompt_payload(repo)),
         capture_output=True,
         text=True,
-        env={"PATH": os.environ["PATH"], **env},
+        env=child_env(env),
         timeout=10,
         check=False,
     )
@@ -271,7 +271,7 @@ def _run_child(script: str, tmp_path: Path) -> tuple[int, int]:
     fake, pid_file = _fake_git(tmp_path, seconds)
     child = subprocess.run(
         [sys.executable, "-I", "-c", script, str(HOOK.parent), str(tmp_path), str(pid_file)],
-        env={"PATH": f"{fake}{os.pathsep}{os.environ['PATH']}"},
+        env=child_env(path=f"{fake}{os.pathsep}{os.environ['PATH']}"),
         timeout=20,
         check=False,
     )
@@ -322,6 +322,10 @@ def test_sigterm_while_another_thread_starts_git_kills_it(tmp_path: Path) -> Non
     assert orphans == 0
 
 
+@posix_only(
+    "test_windows.py::test_exit_cleanup_waits_for_a_git_that_is_starting_and_kills_it",
+    "a sh git found by pgrep",
+)
 def test_exit_while_another_thread_starts_git_kills_it(tmp_path: Path) -> None:
     """The exit cleanup waits for the starting thread too (p32), for up to
     0.3 s: here the start takes 0.2 s."""
@@ -476,7 +480,7 @@ def test_exit_does_not_wait_long_for_a_stalled_start(tmp_path: Path) -> None:
             str(tmp_path),
             str(pid_file),
         ],
-        env={"PATH": f"{fake}{os.pathsep}{os.environ['PATH']}"},
+        env=child_env(path=f"{fake}{os.pathsep}{os.environ['PATH']}"),
         capture_output=True,
         text=True,
         timeout=20,

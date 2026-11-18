@@ -281,6 +281,21 @@ def env(server: StubServer, home: Path, project: Path, data_dir: Path) -> dict[s
     }
 
 
+# What a child Python needs from the environment beyond PATH. On Windows,
+# without SYSTEMROOT OpenSSL can't make a context (ssl.SSLError at import of
+# urllib's HTTPS handler) and other system calls fail; Claude Code passes its
+# whole environment, so a test child must have these too.
+_WINDOWS_VARS = ("SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP")
+
+
+def child_env(env: Mapping[str, str] | None = None, path: str | None = None) -> dict[str, str]:
+    """A small environment for a hook started as a child: PATH (or ``path``),
+    the variables Windows needs, then ``env``."""
+    base = {"PATH": os.environ["PATH"] if path is None else path}
+    base.update({k: os.environ[k] for k in _WINDOWS_VARS if k in os.environ})
+    return {**base, **(env or {})}
+
+
 def run_hook(mode: str, payload: object, env: dict[str, str]) -> str:
     """Run the hook in-process, as Claude Code would; return what it printed."""
     stdout = io.StringIO()

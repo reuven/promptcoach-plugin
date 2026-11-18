@@ -5,8 +5,11 @@ from __future__ import annotations
 import dataclasses
 import json
 import socket
+import ssl
 import time
+import urllib.request
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -130,7 +133,9 @@ def test_refuses_plain_http_remote(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     opened: list[object] = []
-    monkeypatch.setattr(core._OPENER, "open", lambda *a, **k: opened.append(a))
+    monkeypatch.setattr(
+        core, "_opener", lambda: SimpleNamespace(open=lambda *a, **k: opened.append(a))
+    )
     env["CLAUDE_PLUGIN_OPTION_SERVER_URL"] = url
 
     assert run_hook("before", prompt_payload(project), env) == ""
@@ -661,3 +666,26 @@ def test_a_byte_order_mark_on_stdin_is_ignored(
     out = run_hook("before", "﻿" + json.dumps(prompt_payload(project, "coach, quieter")), env)
 
     assert json.loads(out) == {"decision": "block", "reason": "Coach: quieter now."}
+
+
+@pytest.mark.parametrize("prompt", ["coach, quieter", "add a test"])
+def test_no_ssl_context_is_a_transport_error(
+    prompt: str,
+    server: StubServer,
+    env: dict[str, str],
+    project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Python on Windows without SYSTEMROOT can't make an SSL context: that is
+    no answer from the server, not a crash."""
+
+    def no_context(*args: object) -> None:
+        raise ssl.SSLError("unknown error (0xa080024)")
+
+    monkeypatch.setattr(urllib.request, "build_opener", no_context)
+    monkeypatch.setattr(core, "_OPENERS", [])
+
+    out = run_hook("before", prompt_payload(project, prompt), env)
+
+    assert out == (json.dumps(NOT_ANSWERED) if prompt.startswith("coach") else "")
+    assert server.requests == []

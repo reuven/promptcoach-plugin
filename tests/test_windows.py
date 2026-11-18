@@ -14,6 +14,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -51,12 +52,19 @@ def windows(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, Any]]:
     return calls
 
 
-def test_start_options_per_platform() -> None:
+def test_start_options_per_platform(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Both branches on every OS: the POSIX one gets a fake signal mask
+    (Windows has no pthread_sigmask or SIG_UNBLOCK)."""
+    masked: list[tuple[Any, ...]] = []
+    monkeypatch.setattr(signal, "pthread_sigmask", lambda *a: masked.append(a), raising=False)
+    monkeypatch.setattr(signal, "SIG_UNBLOCK", 1, raising=False)
     windows = gitdiff._start_options(windows=True)
     assert windows == {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200)}
     posix = gitdiff._start_options(windows=False)
     assert set(posix) == {"start_new_session", "preexec_fn"}
     assert posix["start_new_session"] is True
+    posix["preexec_fn"]()
+    assert masked == [(1, (signal.SIGTERM,))]
 
 
 def test_windows_git_runs_without_a_group_or_mask(
@@ -498,3 +506,40 @@ def test_real_job_object_kills_a_process_tree(tmp_path: Path) -> None:  # pragma
     finally:
         jobs.close(job)
         proc.kill()
+
+
+def test_exit_cleanup_waits_for_a_git_that_is_starting_and_kills_it(
+    windows: list[tuple[str, Any]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The exit cleanup waits (up to 0.3 s) for a git still starting in another
+    thread, then kills it: the in-process twin of test_round4's
+    test_exit_while_another_thread_starts_git_kills_it, with a Python
+    stand-in git, so it runs on Windows too."""
+    pid_file = _grandchild_git(tmp_path, monkeypatch)
+    if os.name != "nt":
+        monkeypatch.setattr(gitdiff, "_JOBS", FakeJobs())
+    current = subprocess.Popen
+    started = threading.Event()
+    procs: list[Any] = []
+
+    def slow_popen(*args: Any, **kwargs: Any) -> Any:
+        proc = current(*args, **kwargs)
+        procs.append(proc)
+        started.set()
+        time.sleep(0.2)  # git runs, not yet in _LIVE
+        return proc
+
+    monkeypatch.setattr(subprocess, "Popen", slow_popen)
+    thread = threading.Thread(
+        target=gitdiff.run_git, args=(["status"], tmp_path), kwargs={"timeout": 30}, daemon=True
+    )
+    try:
+        thread.start()
+        assert started.wait(10)
+        gitdiff._exit_cleanup()
+        assert procs[0].wait(5) is not None
+    finally:
+        _reap(pid_file)
+        for proc in procs:
+            proc.kill()
+        thread.join(5)

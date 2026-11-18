@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import contextlib
 import json
-import os
 import signal
 import subprocess
 import sys
@@ -18,7 +17,7 @@ from pathlib import Path
 import pytest
 
 import conftest
-from conftest import StubServer, posix_only, prompt_payload
+from conftest import StubServer, child_env, posix_only, prompt_payload
 from promptcoach_client import core, gitdiff
 from promptcoach_client.contract import MAX_REPLY_CHARS
 from promptcoach_client.redact import prints_secrets, redact
@@ -183,7 +182,7 @@ def test_before_hook_finishes_under_its_limit(
         input=json.dumps(prompt_payload(repo)),
         capture_output=True,
         text=True,
-        env={"PATH": os.environ["PATH"], **env},
+        env=child_env(env),
         timeout=10,
         check=False,
     )

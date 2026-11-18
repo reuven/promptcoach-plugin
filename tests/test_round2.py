@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from conftest import StubServer, git, posix_only, prompt_payload, run_hook, stop_payload
+from conftest import StubServer, child_env, git, posix_only, prompt_payload, run_hook, stop_payload
 from promptcoach_client import core, gitdiff
 from promptcoach_client.contract import MAX_OUTPUT_CHARS
 from promptcoach_client.redact import prints_secrets, redact
@@ -45,7 +45,7 @@ def _after_in_a_child(cwd: Path, env: dict[str, str]) -> float:
         input=json.dumps(payload),
         capture_output=True,
         text=True,
-        env={"PATH": os.environ["PATH"], **env, "CLAUDE_PROJECT_DIR": str(cwd)},
+        env=child_env({**env, "CLAUDE_PROJECT_DIR": str(cwd)}),
         timeout=25,
         check=False,
     )
@@ -639,7 +639,7 @@ def test_sigterm_kills_the_running_git(tmp_path: Path) -> None:
     (fake / "git").chmod(0o755)
     child = subprocess.Popen(
         [sys.executable, "-I", "-c", SIGTERM_CHILD, str(HOOK.parent), str(tmp_path)],
-        env={"PATH": f"{fake}{os.pathsep}{os.environ['PATH']}"},
+        env=child_env(path=f"{fake}{os.pathsep}{os.environ['PATH']}"),
     )
     deadline = time.monotonic() + 10
     while not pid_file.exists() or not pid_file.read_text().strip():
