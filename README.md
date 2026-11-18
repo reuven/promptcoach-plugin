@@ -29,7 +29,9 @@ macOS ships is fine), and on Windows the `py` launcher or a `python3` or
 used: see [docs/windows.md](docs/windows.md), which also lists what is
 still to be checked by hand on Windows). If yours is older, the coach says
 so once per session and otherwise stays out of the way; with no Python at
-all, the hooks do nothing. Nothing else is installed: the hook code uses
+all, the hooks do nothing. Without Python 3.9 or newer nothing can keep a
+coach command from Claude either: `coach, quieter` then reaches Claude as
+an ordinary prompt and isn't applied. Nothing else is installed: the hook code uses
 only Python's standard library, and runs as `python3 -I`, so modules in your
 project (or on your `PYTHONPATH`) are never loaded into it.
 
@@ -150,7 +152,9 @@ you sign in at <https://coach.lernerpython.com/signin>.
 ## Time limits
 
 Each hook has one time budget for all its work: 2.5 seconds before a prompt
-(counted from the moment the hook starts) and 13.5 seconds at the end of a turn, inside Claude Code's own limits. A
+(counted from the moment Python starts) and 13.5 seconds at the end of a
+turn. Claude Code's own limits (5 and 20 seconds) leave room for the shell
+and Python to start, which takes longer on Windows. A
 slow git or a slow server means less coaching for that turn, never a stuck
 session. The server can keep a prompt from Claude only when the prompt is a
 coach command such as `coach, quieter`: the plugin checks that itself, and

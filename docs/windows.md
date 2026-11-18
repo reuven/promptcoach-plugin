@@ -36,45 +36,86 @@ quiet: no blocked prompt, no Microsoft Store window.
 
 ### The chosen design
 
-The command has two lines.
+The command has three lines. The plugin root is never written into them:
+both shells read it from the `CLAUDE_PLUGIN_ROOT` environment variable,
+which Claude Code exports to every hook (`"$CLAUDE_PLUGIN_ROOT"` in sh,
+`$env:CLAUDE_PLUGIN_ROOT` in PowerShell, never the `${CLAUDE_PLUGIN_ROOT}`
+placeholder that Claude Code would paste into the text). So a root holding
+`$(...)`, a backtick, `'`, `&`, `%` or a space is only ever a value, never
+shell code; the tests run roots like these and check nothing runs.
 
-1. `exec sh -c '<a small sh script>' "<root>/hooks/coach_hook.py" <mode>`
-   - In `sh` (macOS, Linux) and Git Bash this replaces the shell, so the
-     shell never reads line 2. sh parses and runs a `-c` string one command
-     at a time; the tests check this under sh, bash and dash.
-   - The script picks the interpreter. On macOS and Linux it tries only
-     `python3`: a `py` there is someone else's program. Under Git Bash
-     (`$OSTYPE` is `msys` or `cygwin`) it tries `py -3`, then `python3`, then
-     `python`, and skips anything under `WindowsApps` (the Store stubs).
-   - With no Python found it exits 0 and prints nothing.
-2. A PowerShell `foreach` over `py`, `python3`, `python`, again skipping
-   `WindowsApps`; it runs the first one found (`py` with `-3`) and exits 0.
-   - PowerShell reaches this line because it has no `exec` command: line 1
-     fails with "command not found" and PowerShell moves on to the next
-     statement.
+0. `Set-Alias exec Out-Null`. In PowerShell this makes line 1's `exec`
+   harmless: without it, PowerShell would look `exec` up on PATH and could
+   run an `exec.exe`, `exec.cmd` or `exec.bat` someone left there. In sh it
+   is a command that isn't found; sh says so on stderr and goes on.
+1. `exec sh -c '<script>' sh <mode>`. In sh (macOS, Linux) and Git Bash this
+   replaces the shell, so the shell never reads line 2 (sh runs a `-c`
+   string one command at a time; the tests check sh, bash and dash). The
+   script:
+   - exits 0 at once if the root is unset or `hooks/coach_hook.py` is
+     missing (a stale root would otherwise make Python exit 2, and exit 2
+     blocks every prompt and makes Stop loop);
+   - tries `python3`, then `python` (macOS, Linux; `py` there is someone
+     else's program), or under Git Bash (`$OSTYPE` `msys`/`cygwin`) `py -3`,
+     `python3`, `python`;
+   - skips anything under `WindowsApps`, in any case (the Store stubs), and
+     on macOS skips `/usr/bin/python3` when `xcode-select -p` fails: that is
+     the Command Line Tools stub, which would open an install dialog on
+     every event;
+   - asks each one for its version first (`-c`, stdin closed, output
+     dropped): 3.9+ runs at once; 3.4 to 3.8 is kept in case nothing newer
+     turns up, so `coach_hook.py` can still say once that a newer Python is
+     needed; Python 2 and anything that fails is skipped;
+   - runs the hook without `exec` and then exits 0, whatever Python's
+     status was.
+2. PowerShell does the same: the same file check, `py -3`, `python3`,
+   `python` outside `WindowsApps` (any case, either slash), the same
+   version check, and `exit 0` at the end.
 
-Every interpreter runs with `-I`, as before. The rest of the work (the
-Python 3.9 check, the old-Python warning) is still done by `coach_hook.py`.
+Every interpreter runs with `-I`, as before.
+
+Why no `exec` into Python: it would pass Python's status straight back, and
+a 2 blocks. The cost is that a hook killed at its timeout may leave Python
+running for the rest of its own budget (2.5 s before a prompt, 13.5 s at
+the end of a turn); it stops by itself then, and kills its git on the way
+out.
 
 `tests/test_hook_command.py` pins the command and runs it under every shell
 a machine has, with a stand-in `coach_hook.py` that reports its arguments,
-`-I`, and the bytes it read on stdin. CI runs it on ubuntu, macOS and
-Windows (Git Bash, Windows PowerShell 5.1 and PowerShell 7).
+`-I`, and the bytes it read on stdin, and with stand-in interpreters that
+fail, are Python 2, are old, or sit under `WindowsApps`. CI runs it on
+ubuntu, macOS (both have `pwsh` preinstalled, so the PowerShell line runs
+there too) and Windows (Git Bash, Windows PowerShell 5.1 and PowerShell 7).
 
-Known cost: Python from the Microsoft Store (or a `python3` that lives only
-under `WindowsApps`) is never used, since it can't be told apart from the
-stub by its path. Such a person gets no coaching until they install Python
-from python.org or with uv. This is a choice in favor of never opening the
-Store; revisit it if the manual check shows the stub can be told apart
-safely.
+Known costs:
+
+- Python from the Microsoft Store (or a `python3` that lives only under
+  `WindowsApps`) is never used, since it can't be told apart from the stub
+  by its path. Such a person gets no coaching until they install Python from
+  python.org or with uv. This favors never opening the Store; revisit it if
+  the manual check shows the stub can be told apart safely.
+- Each candidate costs one extra Python start for its version check.
+
+**With no Python 3.9+, nothing can keep a coach command from Claude.** The
+plugin is written in Python, so when no usable Python starts (none at all,
+or only one older than 3.9), the command `coach, quieter` reaches Claude as
+an ordinary prompt and isn't applied. Older Pythons get a once-a-session
+note saying so.
+
+### Timeouts
+
+The hook's own budgets count from when Python starts: 2.5 s before a prompt
+(the server answers within about 1.7 s) and 13.5 s at the end of a turn. The
+shell, the `py` launcher, Python's start and, on Windows, Defender's first
+scan of a new process come on top of that. So hooks.json gives the before
+hook 5 s, the record hook 5 s and the Stop hook 20 s. The manual Windows
+check should measure the real start cost.
 
 ### Assumptions only a Windows machine can confirm
 
-- [ ] Claude Code writes `${CLAUDE_PLUGIN_ROOT}` into a shell-form command as
-      text before the shell sees it. In PowerShell `${CLAUDE_PLUGIN_ROOT}`
-      would otherwise be an (empty) PowerShell variable, not the environment
-      variable.
-- [ ] Claude Code passes the command's newline through to the shell
+- [ ] Claude Code exports `CLAUDE_PLUGIN_ROOT` to shell-form hooks on Windows
+      (the docs say both forms export it), with native backslashes.
+- [ ] Claude Code passes the command's newlines through to the shell
       unchanged, under both Git Bash and PowerShell.
 - [ ] Which PowerShell Claude Code starts (`powershell.exe` 5.1 or `pwsh`),
       with which flags. Line 2 is written for both. An execution policy
@@ -82,14 +123,15 @@ safely.
 - [ ] A native program started from PowerShell's `-Command` gets the hook's
       stdin (the CI test checks this for `powershell -NoProfile -Command`
       and `pwsh -NoProfile -Command`, but not as Claude Code starts it).
-- [ ] The "command not found" error from `exec` in PowerShell is only written
-      to stderr, and Claude Code ignores stderr when the hook exits 0.
+- [ ] The errors that lines 0 and 1 print (sh's "Set-Alias: not found",
+      PowerShell's parameter error from `Out-Null`) go only to stderr, which
+      Claude Code ignores when the hook exits 0.
 - [ ] The paths `py.exe`, python.org's `python.exe`, and uv's `python3.exe`
       don't contain `WindowsApps`, and every Store stub does.
-- [ ] A plugin root containing `$` or a backtick would break the double
-      quotes in either shell; Windows user names rarely contain them.
-- [ ] The hook finishes within Claude Code's 3 s limit with the shell's
-      start added (Git Bash and PowerShell start slower than `sh`).
+- [ ] PowerShell passes Python's output through intact. The hook's output is
+      ASCII JSON (`json.dumps` escapes the rest), so re-encoding can't hurt it.
+- [ ] The before hook finishes within 5 s with the shell's and Python's start
+      added, also on a cold start with Defender scanning.
 
 ## Git on Windows
 
@@ -100,21 +142,31 @@ injected platform value, so both paths are tested on every OS):
   no `start_new_session` and no `preexec_fn`.
 - There is no signal masking: Windows has no `pthread_sigmask`, and Claude
   Code can't send it a SIGTERM to handle anyway.
-- A git that runs too long is stopped with `proc.kill()` (TerminateProcess).
-  That stops git itself, not programs git started; with the safe config the
-  plugin forces (no hooks, no filters, no fsmonitor, no transport) git
-  starts none for the commands the plugin runs.
+- Each git goes into a Job Object set to kill everything in it when the
+  job closes (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, through `ctypes`), right
+  after it starts. Git for Windows' `cmd\git.exe` is a wrapper that starts
+  the real `git.exe`; killing only the wrapper would leave the real git
+  holding the output pipe. On a timeout the job is terminated, which stops
+  both; when git finishes, closing the job ends anything git left behind.
+  If a job can't be made, `taskkill /T /F /PID` is the fallback.
+- run_git stops waiting for git's output 0.2 s after a kill, even if
+  something still holds the pipe, so a stuck git can't hold the hook past
+  its deadline.
 - `core.hooksPath` is `os.devnull` (`nul` on Windows), as before.
 - Control files are opened without `O_NOFOLLOW` and `O_NONBLOCK`, which
-  Windows lacks; a symlink is refused by an `lstat` check first instead.
-  Windows has no FIFOs in the file system.
+  Windows lacks, and with `O_BINARY`. A symlink, or anything else not a
+  regular file, is refused by an `lstat` check before the open, and the
+  opened file must be the one checked (`os.path.samestat`). Windows has no
+  FIFOs in the file system.
 
-**A git can outlive a killed hook.** If Claude Code kills the hook outright
-at its time limit (assume it does, with no handler running), nothing in the
-hook runs to stop git. Git has no timeout setting of its own, so the orphan
-runs until its command ends: about as long as `git add -A` on the project.
-It writes only the plugin's private index and unreferenced objects. A Job
-Object with "kill on close" would end git with the hook; see TODO.md.
+**When the hook itself is killed.** Windows closes a killed process's
+handles, and closing the last handle of a kill-on-close job ends every
+process in it, so git ends with the hook. Two gaps remain: a process git
+starts in the instant between git's start and its assignment to the job is
+outside the job; and if the job couldn't be made (the `taskkill` fallback),
+an orphaned git runs until its command ends, about as long as `git add -A`
+on the project, writing only the plugin's private index and unreferenced
+objects.
 
 ## Text and paths
 

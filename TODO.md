@@ -23,7 +23,10 @@
 - [ ] Read the first windows-latest CI run job by job: it is the first time
       the suite runs on Windows (CRLF checkouts, symlink privileges, git's
       behavior there).
-- [ ] A Job Object (kill on close) so git can't outlive a killed hook.
+- [x] A Job Object (kill on close) so git can't outlive a killed hook.
+- [ ] Coverage on Windows CI: the POSIX branches (process groups, signal
+      masks) can't run there, so the 100% gate will fail on windows-latest.
+      Needs a decision (a per-OS gate, or platform-specific exclusions).
 - [ ] Junctions inside `.git` (`DirEntry.is_junction`, 3.12+, or the
       reparse-point attribute before that): the walk treats them as
       directories today.
