@@ -1,0 +1,2 @@
+# LF everywhere, also in Windows checkouts (CI runs there).
+* text=auto eol=lf

@@ -10,13 +10,14 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 import subprocess
 import time
 from pathlib import Path
 
 import pytest
 
-from conftest import StubServer, git, prompt_payload, run_hook, stop_payload
+from conftest import StubServer, git, posix_only, prompt_payload, run_hook, stop_payload
 from promptcoach_client import gitdiff
 
 
@@ -62,7 +63,11 @@ def test_partial_clone_never_fetches(
     git(repo, "add", "f.txt")
     git(repo, "commit", "-q", "-m", "f")
     blob = git(repo, "rev-parse", "HEAD:f.txt").strip()
-    (repo / ".git" / "objects" / blob[:2] / blob[2:]).unlink()
+    loose = repo / ".git" / "objects" / blob[:2] / blob[2:]
+    loose.chmod(
+        stat.S_IWRITE | stat.S_IREAD
+    )  # git writes objects read-only; Windows won't unlink that
+    loose.unlink()
     for key, value in [
         ("core.repositoryformatversion", "1"),
         ("extensions.partialClone", "origin"),
@@ -219,6 +224,23 @@ def test_linked_worktree_still_gets_its_diff(
 
     diffs = _diffs(server)
     assert all(isinstance(d, str) and "+print('in the worktree')" in d for d in diffs)
+
+
+def test_linked_worktree_whose_gitdir_file_has_crlf_still_gets_its_diff(
+    server: StubServer, env: dict[str, str], repo: Path, data_dir: Path, tmp_path: Path
+) -> None:
+    """A worktree's ``gitdir`` file edited on Windows (CRLF): git reads it
+    stripped, and so does the plugin."""
+    tree = tmp_path / "wt"
+    git(repo, "worktree", "add", "-q", str(tree))
+    [listed] = (repo / ".git" / "worktrees").glob("*/gitdir")
+    listed.write_bytes(listed.read_bytes().rstrip(b"\r\n") + b"\r\n")
+    _not_prompt_only(data_dir)
+
+    _turn(tree, env, tree / "app.py", "print('in the worktree')\n")
+
+    diffs = _diffs(server)
+    assert diffs and all(isinstance(d, str) and "+print('in the worktree')" in d for d in diffs)
 
 
 def test_worktree_file_naming_an_unregistered_worktree_gets_no_diff(
@@ -470,6 +492,7 @@ def test_symlinked_git_dir_entries_are_refused(entry: str, tmp_path: Path) -> No
     assert not gitdiff._no_symlinks(git_dir, gitdiff.Deadline(10))
 
 
+@posix_only("no test (chmod can't make a directory unreadable there)", "an unreadable directory")
 def test_git_dir_walk_edge_cases(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, repo: Path
 ) -> None:
@@ -574,6 +597,10 @@ def test_git_dir_over_the_cap_means_no_diff(
 # --- mutation survivors of this round: process group, no spawn without time ---------------
 
 
+@posix_only(
+    "test_windows.py::test_windows_git_that_hangs_is_killed_in_time",
+    "process groups; on Windows git alone is killed, see docs/windows.md",
+)
 def test_a_stopped_git_takes_its_children_with_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

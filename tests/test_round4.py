@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import StubServer, prompt_payload
+from conftest import StubServer, child_env, posix_only, prompt_payload
 from promptcoach_client import gitdiff
 from promptcoach_client.redact import prints_secrets, redact
 
@@ -221,7 +221,7 @@ def test_before_budget_counts_from_the_process_start(
         input=json.dumps(prompt_payload(repo)),
         capture_output=True,
         text=True,
-        env={"PATH": os.environ["PATH"], **env},
+        env=child_env(env),
         timeout=10,
         check=False,
     )
@@ -271,7 +271,7 @@ def _run_child(script: str, tmp_path: Path) -> tuple[int, int]:
     fake, pid_file = _fake_git(tmp_path, seconds)
     child = subprocess.run(
         [sys.executable, "-I", "-c", script, str(HOOK.parent), str(tmp_path), str(pid_file)],
-        env={"PATH": f"{fake}{os.pathsep}{os.environ['PATH']}"},
+        env=child_env(path=f"{fake}{os.pathsep}{os.environ['PATH']}"),
         timeout=20,
         check=False,
     )
@@ -308,6 +308,7 @@ started.wait(10)
 """
 
 
+@posix_only("test_windows.py::test_windows_kill_live_terminates_each_process", "SIGTERM")
 def test_sigterm_while_another_thread_starts_git_kills_it(tmp_path: Path) -> None:
     """The handler waits for the starting thread (R10: no lock in the handler)."""
     script = (
@@ -321,6 +322,10 @@ def test_sigterm_while_another_thread_starts_git_kills_it(tmp_path: Path) -> Non
     assert orphans == 0
 
 
+@posix_only(
+    "test_windows.py::test_exit_cleanup_waits_for_a_git_that_is_starting_and_kills_it",
+    "a sh git found by pgrep",
+)
 def test_exit_while_another_thread_starts_git_kills_it(tmp_path: Path) -> None:
     """The exit cleanup waits for the starting thread too (p32), for up to
     0.3 s: here the start takes 0.2 s."""
@@ -345,6 +350,7 @@ gitdiff.run_git(["status"], pathlib.Path(sys.argv[2]), timeout=30)
 """
 
 
+@posix_only("test_windows.py::test_windows_kill_live_terminates_each_process", "SIGTERM")
 def test_sigterm_handled_inside_the_start_window_kills_git(tmp_path: Path) -> None:
     """Deferred while git starts, then run: no orphan (p30)."""
     code, orphans = _run_child(CHILD_HEAD + EARLY_HANDLER, tmp_path)
@@ -352,6 +358,7 @@ def test_sigterm_handled_inside_the_start_window_kills_git(tmp_path: Path) -> No
     assert orphans == 0
 
 
+@posix_only("test_windows.py::test_windows_git_runs_without_a_group_or_mask", "signal masks")
 def test_a_deferred_sigterm_runs_once_git_is_tracked(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -385,6 +392,7 @@ def test_a_deferred_sigterm_runs_once_git_is_tracked(
     assert not gitdiff._PENDING_TERM
 
 
+@posix_only("test_windows.py::test_windows_kill_live_terminates_each_process", "SIGTERM and killpg")
 def test_sigterm_during_the_exit_cleanup_does_not_deadlock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -412,6 +420,7 @@ def test_sigterm_during_the_exit_cleanup_does_not_deadlock(
     assert seen == [signal.SIGTERM]
 
 
+@posix_only("test_windows.py::test_windows_git_runs_without_a_group_or_mask", "signal masks")
 def test_git_does_not_inherit_a_blocked_sigterm(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -454,6 +463,10 @@ print(time.time(), flush=True)
 """
 
 
+@posix_only(
+    "test_windows.py::test_windows_kill_live_terminates_each_process",
+    "SIGKILL and a git written in sh",
+)
 def test_exit_does_not_wait_long_for_a_stalled_start(tmp_path: Path) -> None:
     """Main finishes; the process is gone within about half a second."""
     fake, pid_file = _fake_git(tmp_path)
@@ -467,7 +480,7 @@ def test_exit_does_not_wait_long_for_a_stalled_start(tmp_path: Path) -> None:
             str(tmp_path),
             str(pid_file),
         ],
-        env={"PATH": f"{fake}{os.pathsep}{os.environ['PATH']}"},
+        env=child_env(path=f"{fake}{os.pathsep}{os.environ['PATH']}"),
         capture_output=True,
         text=True,
         timeout=20,
@@ -480,6 +493,7 @@ def test_exit_does_not_wait_long_for_a_stalled_start(tmp_path: Path) -> None:
     assert finished - float(child.stdout.split()[-1]) < 0.8
 
 
+@posix_only("test_windows.py::test_windows_kill_live_terminates_each_process", "killpg")
 def test_exit_cleanup_kills_what_it_can_when_the_lock_is_held(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

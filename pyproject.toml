@@ -1,6 +1,6 @@
 [project]
 name = "promptcoach-plugin"
-version = "0.1.0"
+version = "1.0.0b1"
 description = "Claude Code plugin for the LernerPython prompt coach (hook code is stdlib only)"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -18,22 +18,42 @@ dev = [
     "pytest>=8.4,<9; python_version < '3.10'",
     "pytest-cov>=7.0.0",
     "ruff>=0.17.5",
+    "hypothesis>=6.141.1",
 ]
 
 [tool.pytest.ini_options]
 addopts = "--cov=promptcoach_client --cov=coach_hook --cov-branch --cov-report=term-missing --cov-fail-under=100 -p no:cacheprovider"
-pythonpath = ["plugins/promptcoach/hooks", "tests"]
+pythonpath = ["plugins/promptcoach/hooks", "tests", "tools"]
 testpaths = ["tests"]
 filterwarnings = ["error"]
+
+# CI combines every cell's data (ci.yml's coverage job): paths are stored
+# relative and mapped to one name whichever runner or slash wrote them.
+[tool.coverage.run]
+relative_files = true
+
+[tool.coverage.paths]
+source = [
+    "plugins/promptcoach/hooks/",
+    "plugins\\promptcoach\\hooks\\",
+    "*/plugins/promptcoach/hooks/",
+    "*\\plugins\\promptcoach\\hooks\\",
+]
+
+[tool.coverage.report]
+show_missing = true
 
 [tool.mypy]
 # The hook code is checked as Python 3.9, its oldest supported version. The
 # tests import pytest, which needs 3.10+, so CI checks them in a second run:
 # `uv run mypy --python-version 3.10 tests`.
-files = ["plugins/promptcoach/hooks"]
-mypy_path = ["plugins/promptcoach/hooks", "tests"]
+files = ["plugins/promptcoach/hooks", "tools"]
+mypy_path = ["plugins/promptcoach/hooks", "tests", "tools"]
 explicit_package_bases = true
 python_version = "3.9"
+# Checked as Linux on every OS (CI runs on Windows too): the POSIX-only calls
+# in gitdiff are behind a runtime platform value, not sys.platform checks.
+platform = "linux"
 strict = true
 
 [tool.ruff]

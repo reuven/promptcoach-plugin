@@ -1,16 +1,50 @@
 {
   "hooks": {
     "UserPromptSubmit": [
-      {"hooks": [{"type": "command", "command": "python3", "args": ["-I", "${CLAUDE_PLUGIN_ROOT}/hooks/coach_hook.py", "before"], "timeout": 3}]}
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "Set-Alias exec Out-Null\nexec sh -c 'h=\"$CLAUDE_PLUGIN_ROOT/hooks/coach_hook.py\"; m=\"$1\"; [ -n \"$CLAUDE_PLUGIN_ROOT\" ] && [ -f \"$h\" ] || exit 0; case \"$OSTYPE\" in msys*|cygwin*) c=\"py python3 python\";; *) c=\"python3 python\";; esac; v=\"import sys; sys.exit(0 if sys.version_info >= (3, 9) else 3 if sys.version_info >= (3, 4) else 1)\"; f=; g=; for p in $c; do w=$(command -v \"$p\") || continue; case \"$w\" in *[Ww][Ii][Nn][Dd][Oo][Ww][Ss][Aa][Pp][Pp][Ss]*) continue;; esac; if [ \"$w\" = /usr/bin/python3 ] && command -v xcode-select >/dev/null && ! xcode-select -p >/dev/null 2>&1; then continue; fi; a=; [ \"$p\" = py ] && a=-3; \"$w\" $a -c \"$v\" </dev/null >/dev/null 2>&1; r=$?; if [ \"$r\" = 0 ]; then \"$w\" $a -I \"$h\" \"$m\"; exit 0; fi; if [ \"$r\" = 3 ] && [ -z \"$f\" ]; then f=\"$w\"; g=\"$a\"; fi; done; if [ -n \"$f\" ]; then \"$f\" $g -I \"$h\" \"$m\"; fi; exit 0' sh before\n$r = $env:CLAUDE_PLUGIN_ROOT; if ($r) { $h = Join-Path $r 'hooks/coach_hook.py' } else { $h = '' }; if ($h -and (Test-Path -LiteralPath $h -PathType Leaf)) { $v = 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 3 if sys.version_info >= (3, 4) else 1)'; $f = $null; $g = @(); foreach ($n in 'py', 'python3', 'python') { $c = Get-Command $n -CommandType Application -ErrorAction SilentlyContinue | Where-Object { $_.Source -notmatch '[\\\\/]WindowsApps[\\\\/]' } | Select-Object -First 1; if (-not $c) { continue }; $a = @(); if ($n -eq 'py') { $a = @('-3') }; $null = & $c.Source @a -c $v 2>$null; if ($LASTEXITCODE -eq 0) { & $c.Source @a -I $h before; exit 0 }; if ($LASTEXITCODE -eq 3 -and -not $f) { $f = $c.Source; $g = $a } }; if ($f) { & $f @g -I $h before } }; exit 0",
+            "timeout": 5
+          }
+        ]
+      }
     ],
     "PostToolUse": [
-      {"matcher": "Bash", "hooks": [{"type": "command", "command": "python3", "args": ["-I", "${CLAUDE_PLUGIN_ROOT}/hooks/coach_hook.py", "record"], "timeout": 2}]}
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "Set-Alias exec Out-Null\nexec sh -c 'h=\"$CLAUDE_PLUGIN_ROOT/hooks/coach_hook.py\"; m=\"$1\"; [ -n \"$CLAUDE_PLUGIN_ROOT\" ] && [ -f \"$h\" ] || exit 0; case \"$OSTYPE\" in msys*|cygwin*) c=\"py python3 python\";; *) c=\"python3 python\";; esac; v=\"import sys; sys.exit(0 if sys.version_info >= (3, 9) else 3 if sys.version_info >= (3, 4) else 1)\"; f=; g=; for p in $c; do w=$(command -v \"$p\") || continue; case \"$w\" in *[Ww][Ii][Nn][Dd][Oo][Ww][Ss][Aa][Pp][Pp][Ss]*) continue;; esac; if [ \"$w\" = /usr/bin/python3 ] && command -v xcode-select >/dev/null && ! xcode-select -p >/dev/null 2>&1; then continue; fi; a=; [ \"$p\" = py ] && a=-3; \"$w\" $a -c \"$v\" </dev/null >/dev/null 2>&1; r=$?; if [ \"$r\" = 0 ]; then \"$w\" $a -I \"$h\" \"$m\"; exit 0; fi; if [ \"$r\" = 3 ] && [ -z \"$f\" ]; then f=\"$w\"; g=\"$a\"; fi; done; if [ -n \"$f\" ]; then \"$f\" $g -I \"$h\" \"$m\"; fi; exit 0' sh record\n$r = $env:CLAUDE_PLUGIN_ROOT; if ($r) { $h = Join-Path $r 'hooks/coach_hook.py' } else { $h = '' }; if ($h -and (Test-Path -LiteralPath $h -PathType Leaf)) { $v = 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 3 if sys.version_info >= (3, 4) else 1)'; $f = $null; $g = @(); foreach ($n in 'py', 'python3', 'python') { $c = Get-Command $n -CommandType Application -ErrorAction SilentlyContinue | Where-Object { $_.Source -notmatch '[\\\\/]WindowsApps[\\\\/]' } | Select-Object -First 1; if (-not $c) { continue }; $a = @(); if ($n -eq 'py') { $a = @('-3') }; $null = & $c.Source @a -c $v 2>$null; if ($LASTEXITCODE -eq 0) { & $c.Source @a -I $h record; exit 0 }; if ($LASTEXITCODE -eq 3 -and -not $f) { $f = $c.Source; $g = $a } }; if ($f) { & $f @g -I $h record } }; exit 0",
+            "timeout": 5
+          }
+        ]
+      }
     ],
     "PostToolUseFailure": [
-      {"matcher": "Bash", "hooks": [{"type": "command", "command": "python3", "args": ["-I", "${CLAUDE_PLUGIN_ROOT}/hooks/coach_hook.py", "record"], "timeout": 2}]}
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "Set-Alias exec Out-Null\nexec sh -c 'h=\"$CLAUDE_PLUGIN_ROOT/hooks/coach_hook.py\"; m=\"$1\"; [ -n \"$CLAUDE_PLUGIN_ROOT\" ] && [ -f \"$h\" ] || exit 0; case \"$OSTYPE\" in msys*|cygwin*) c=\"py python3 python\";; *) c=\"python3 python\";; esac; v=\"import sys; sys.exit(0 if sys.version_info >= (3, 9) else 3 if sys.version_info >= (3, 4) else 1)\"; f=; g=; for p in $c; do w=$(command -v \"$p\") || continue; case \"$w\" in *[Ww][Ii][Nn][Dd][Oo][Ww][Ss][Aa][Pp][Pp][Ss]*) continue;; esac; if [ \"$w\" = /usr/bin/python3 ] && command -v xcode-select >/dev/null && ! xcode-select -p >/dev/null 2>&1; then continue; fi; a=; [ \"$p\" = py ] && a=-3; \"$w\" $a -c \"$v\" </dev/null >/dev/null 2>&1; r=$?; if [ \"$r\" = 0 ]; then \"$w\" $a -I \"$h\" \"$m\"; exit 0; fi; if [ \"$r\" = 3 ] && [ -z \"$f\" ]; then f=\"$w\"; g=\"$a\"; fi; done; if [ -n \"$f\" ]; then \"$f\" $g -I \"$h\" \"$m\"; fi; exit 0' sh record\n$r = $env:CLAUDE_PLUGIN_ROOT; if ($r) { $h = Join-Path $r 'hooks/coach_hook.py' } else { $h = '' }; if ($h -and (Test-Path -LiteralPath $h -PathType Leaf)) { $v = 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 3 if sys.version_info >= (3, 4) else 1)'; $f = $null; $g = @(); foreach ($n in 'py', 'python3', 'python') { $c = Get-Command $n -CommandType Application -ErrorAction SilentlyContinue | Where-Object { $_.Source -notmatch '[\\\\/]WindowsApps[\\\\/]' } | Select-Object -First 1; if (-not $c) { continue }; $a = @(); if ($n -eq 'py') { $a = @('-3') }; $null = & $c.Source @a -c $v 2>$null; if ($LASTEXITCODE -eq 0) { & $c.Source @a -I $h record; exit 0 }; if ($LASTEXITCODE -eq 3 -and -not $f) { $f = $c.Source; $g = $a } }; if ($f) { & $f @g -I $h record } }; exit 0",
+            "timeout": 5
+          }
+        ]
+      }
     ],
     "Stop": [
-      {"hooks": [{"type": "command", "command": "python3", "args": ["-I", "${CLAUDE_PLUGIN_ROOT}/hooks/coach_hook.py", "after"], "timeout": 15}]}
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "Set-Alias exec Out-Null\nexec sh -c 'h=\"$CLAUDE_PLUGIN_ROOT/hooks/coach_hook.py\"; m=\"$1\"; [ -n \"$CLAUDE_PLUGIN_ROOT\" ] && [ -f \"$h\" ] || exit 0; case \"$OSTYPE\" in msys*|cygwin*) c=\"py python3 python\";; *) c=\"python3 python\";; esac; v=\"import sys; sys.exit(0 if sys.version_info >= (3, 9) else 3 if sys.version_info >= (3, 4) else 1)\"; f=; g=; for p in $c; do w=$(command -v \"$p\") || continue; case \"$w\" in *[Ww][Ii][Nn][Dd][Oo][Ww][Ss][Aa][Pp][Pp][Ss]*) continue;; esac; if [ \"$w\" = /usr/bin/python3 ] && command -v xcode-select >/dev/null && ! xcode-select -p >/dev/null 2>&1; then continue; fi; a=; [ \"$p\" = py ] && a=-3; \"$w\" $a -c \"$v\" </dev/null >/dev/null 2>&1; r=$?; if [ \"$r\" = 0 ]; then \"$w\" $a -I \"$h\" \"$m\"; exit 0; fi; if [ \"$r\" = 3 ] && [ -z \"$f\" ]; then f=\"$w\"; g=\"$a\"; fi; done; if [ -n \"$f\" ]; then \"$f\" $g -I \"$h\" \"$m\"; fi; exit 0' sh after\n$r = $env:CLAUDE_PLUGIN_ROOT; if ($r) { $h = Join-Path $r 'hooks/coach_hook.py' } else { $h = '' }; if ($h -and (Test-Path -LiteralPath $h -PathType Leaf)) { $v = 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 3 if sys.version_info >= (3, 4) else 1)'; $f = $null; $g = @(); foreach ($n in 'py', 'python3', 'python') { $c = Get-Command $n -CommandType Application -ErrorAction SilentlyContinue | Where-Object { $_.Source -notmatch '[\\\\/]WindowsApps[\\\\/]' } | Select-Object -First 1; if (-not $c) { continue }; $a = @(); if ($n -eq 'py') { $a = @('-3') }; $null = & $c.Source @a -c $v 2>$null; if ($LASTEXITCODE -eq 0) { & $c.Source @a -I $h after; exit 0 }; if ($LASTEXITCODE -eq 3 -and -not $f) { $f = $c.Source; $g = $a } }; if ($f) { & $f @g -I $h after } }; exit 0",
+            "timeout": 20
+          }
+        ]
+      }
     ]
   }
 }

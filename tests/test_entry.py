@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import io
 import json
-import os
 import runpy
 import subprocess
 import sys
@@ -13,7 +12,7 @@ from pathlib import Path
 import pytest
 
 import coach_hook
-from conftest import StubServer, prompt_payload
+from conftest import StubServer, child_env, prompt_payload
 
 HOOK = Path(__file__).resolve().parents[1] / "plugins" / "promptcoach" / "hooks" / "coach_hook.py"
 
@@ -21,14 +20,14 @@ HOOK = Path(__file__).resolve().parents[1] / "plugins" / "promptcoach" / "hooks"
 def test_runs_as_a_script(server: StubServer, env: dict[str, str], project: Path) -> None:
     """The real thing: a child process with only the standard library."""
     server.reply = {"message": "Hi.", "block_prompt": False, "prompt_only": False}
-    child_env = {"PATH": os.environ["PATH"], **env}
+    child = child_env(env)
 
     done = subprocess.run(
         [sys.executable, "-I", str(HOOK), "before"],
         input=json.dumps(prompt_payload(project)),
         capture_output=True,
         text=True,
-        env=child_env,
+        env=child,
         timeout=10,
         check=False,
     )
@@ -90,3 +89,51 @@ def test_run_hands_over_to_the_client(env: dict[str, str], project: Path) -> Non
     out = io.StringIO()
     assert coach_hook.run(["record"], io.StringIO("{}"), out, env) == 0
     assert out.getvalue() == ""
+
+
+def test_a_broken_install_still_exits_0(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A half-updated plugin (the client won't import) is silence, not exit 1."""
+    monkeypatch.setitem(sys.modules, "promptcoach_client.claude_code", None)
+    out = io.StringIO()
+
+    assert coach_hook.run(["before"], io.StringIO("{}"), out, {}) == 0
+    assert out.getvalue() == ""
+
+
+def test_stdin_with_a_byte_order_mark_reads_without_it() -> None:
+    stdin = io.TextIOWrapper(io.BytesIO(b"\xef\xbb\xbf{}"), encoding="cp1252")
+
+    coach_hook.utf8(stdin, "utf-8-sig")
+
+    assert stdin.read() == "{}"
+
+
+# The hook as a child, with SSL broken before anything imports: as on Windows
+# without SYSTEMROOT, where making an SSL context raises.
+BROKEN_SSL = """
+import runpy, ssl, sys, urllib.request
+def broken(*args, **kwargs):
+    raise ssl.SSLError("unknown error (0xa080024)")
+urllib.request.build_opener = broken
+ssl.create_default_context = broken
+sys.argv = [sys.argv[1], "before"]
+runpy.run_path(sys.argv[0], run_name="__main__")
+"""
+
+
+def test_a_broken_ssl_never_crashes_the_hook(
+    server: StubServer, env: dict[str, str], project: Path
+) -> None:
+    done = subprocess.run(
+        [sys.executable, "-I", "-c", BROKEN_SSL, str(HOOK)],
+        input=json.dumps(prompt_payload(project, "coach, quieter")),
+        capture_output=True,
+        text=True,
+        env=child_env(env),
+        timeout=10,
+        check=False,
+    )
+
+    assert (done.returncode, done.stderr) == (0, "")
+    assert json.loads(done.stdout)["decision"] == "block"
+    assert server.requests == []

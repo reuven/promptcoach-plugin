@@ -19,7 +19,9 @@ Promises kept here, whatever the agent:
 - Secrets filtered first (``redact``): no output from commands that print
   credentials, and common token shapes redacted. The server scrubs again.
 - One deadline per hook: every git call and the request share it.
-- A block is honored only for a coach command ("coach, quieter").
+- A block is honored only for a coach command ("coach, quieter"), and a
+  coach command never reaches the agent, whatever the server replies (or
+  with no token at all): where the agent can block, it is blocked here.
 - Every string sent is valid UTF-8.
 """
 
@@ -51,6 +53,7 @@ from .contract import (
     MAX_PROMPT_CHARS,
     MAX_REPLY_CHARS,
     MAX_TOOL_RUNS,
+    MAX_VERSION_CHARS,
     PROJECT_INSTRUCTION_FILES,
     VERSION_PATTERN,
 )
@@ -73,6 +76,17 @@ LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1"})
 IS_TEST = re.compile(r"\b(pytest|unittest|tox|nox|make test|uv run pytest)\b")
 _ID = re.compile(ID_PATTERN)
 _VERSION = re.compile(VERSION_PATTERN)
+
+
+def valid_version(text: str) -> bool:
+    """True if the server would take ``text`` as a version (body and header).
+
+    Matching only: the client never orders versions (the server does, by
+    PEP 440).
+    """
+    return len(text) <= MAX_VERSION_CHARS and _VERSION.fullmatch(text) is not None
+
+
 _FILE_SAFE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 _TEMP_PREFIXES = ("snap-", "idx-", "runs-")
 _COMMAND = re.compile(COMMAND_PATTERN, re.IGNORECASE | re.ASCII)
@@ -80,6 +94,14 @@ _SURROGATE = re.compile("[\ud800-\udfff]")
 # C0 and C1 controls (and DEL), except newline and tab: no terminal escapes.
 _CONTROL = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 MAX_MESSAGE_BYTES = 4096
+# The block for a coach command the server didn't apply: no answer (timed out,
+# refused, 5xx, not a reply) or a quiet one (its pool or rate limit). The
+# server answers a command it applied with a block, so this one wasn't.
+# Fixed text, in the voice of the server's own ``COMMAND_RETRY``: nothing the
+# person typed.
+COMMAND_NOT_ANSWERED = (
+    "Coach: I didn't answer in time, so that command wasn't applied. Please send it again."
+)
 
 
 @dataclass(frozen=True)
@@ -100,18 +122,21 @@ class AgentProfile:
     capabilities: Capabilities
     sources: SetupSources
     missing_token_message: str
+    # The block for a coach command typed before a token is set: says how
+    # to set one up in this agent. Fixed text, never the prompt.
+    command_without_token_message: str
 
     def __post_init__(self) -> None:
         """Refuse a profile the server would refuse (a 422 is silence)."""
         sources = self.sources
-        if self.agent not in AGENTS or not _VERSION.fullmatch(self.plugin_version):
+        if self.agent not in AGENTS or not valid_version(self.plugin_version):
             raise ValueError("unknown agent or bad version")
         if not set(sources.project_instruction_files) <= set(PROJECT_INSTRUCTION_FILES):
             raise ValueError("unknown project instruction file")
         if not set(sources.global_instruction_files) <= set(GLOBAL_INSTRUCTION_FILES):
             raise ValueError("unknown global instruction file")
-        if not self.missing_token_message:
-            raise ValueError("missing_token_message is required")
+        if not self.missing_token_message or not self.command_without_token_message:
+            raise ValueError("missing_token_message and command_without_token_message are required")
 
 
 @dataclass(frozen=True)
@@ -240,37 +265,56 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-_OPENER = urllib.request.build_opener(_NoRedirect)
+_OPENERS: list[urllib.request.OpenerDirector] = []  # built once, on first use
+
+
+def _opener() -> urllib.request.OpenerDirector:
+    """The no-redirect opener, built when first needed, never at import:
+    building it makes an SSL context, which can fail (Python on Windows
+    without SYSTEMROOT raises ssl.SSLError). Inside ``post`` that is one more
+    way of getting no answer, not a crash."""
+    if not _OPENERS:
+        _OPENERS.append(urllib.request.build_opener(_NoRedirect))
+    return _OPENERS[0]
 
 
 def post(
-    url: str | None, token: str, body: dict[str, Any], timeout: float
+    url: str | None,
+    token: str,
+    body: dict[str, Any],
+    timeout: float,
+    version: str | None = None,
 ) -> dict[str, Any] | None:
     """POST ``body`` as JSON; the reply object, or None on any problem.
 
     ``timeout`` bounds the whole call (name lookup and a slow, trickling
     server included), not only each socket read: the request runs in a
     daemon thread that the hook simply stops waiting for. Any error in that
-    thread ends it quietly (nothing on stderr).
+    thread ends it quietly (nothing on stderr). ``version``, the plugin's,
+    goes in the ``X-Promptcoach-Plugin`` header, so the server can tell
+    which release asked even before it reads the body.
     """
     if url is None or timeout <= 0:
         return None
     body = valid_text(body)
     result: list[dict[str, Any]] = []
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {token}",
+        "User-Agent": "promptcoach-client",
+    }
+    if version is not None:
+        headers["X-Promptcoach-Plugin"] = version
 
     def call() -> None:
         request = urllib.request.Request(  # noqa: S310 - endpoint() allows only http(s)
             url,
             data=json.dumps(body).encode(),
             method="POST",
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {token}",
-                "User-Agent": "promptcoach-client",
-            },
+            headers=headers,
         )
         try:
-            with _OPENER.open(request, timeout=timeout) as response:
+            with _opener().open(request, timeout=timeout) as response:
                 raw = response.read(MAX_REPLY_BYTES + 1) if response.status == 200 else b""
             data = json.loads(raw) if 0 < len(raw) <= MAX_REPLY_BYTES else None
         except urllib.error.HTTPError as error:  # 4xx, 5xx, or a refused redirect
@@ -489,15 +533,24 @@ def before(
     The start-of-turn snapshot is taken alongside the request (unless the
     person chose prompt-only mode); both end by the hook's deadline. A
     prompt the server blocks never reaches the agent, so its snapshot is
-    dropped; the server may block only a coach command. The reply is
-    built before any state is saved, and saving is best effort.
+    dropped; the server may block only a coach command. A coach command
+    never reaches the agent (where it can block): one the server didn't
+    block is blocked here, with the server's message when it sent one (the
+    sign-in or lapsed text, so it isn't hidden), else ``COMMAND_NOT_ANSWERED``;
+    with no token, with the profile's setup message. As a prompt the agent
+    would act on it. The reply is built before any state is saved, and
+    saving is best effort; a local block saves no server setting.
     """
     deadline = gitdiff.Deadline(BEFORE_BUDGET_S, started)
     store = Store(config.data_dir)
     store.sweep(time.time())
+    command = profile.capabilities.can_block_prompt and is_coach_command(event.prompt)
     if not _valid_ids(event.session_id, event.prompt_id):
-        return None
+        # The server would refuse these ids: a command can't be applied.
+        return Reply(COMMAND_NOT_ANSWERED, True, True) if command else None
     if not config.token:
+        if command:
+            return Reply(profile.command_without_token_message, True, True)
         if store.first_warning(event.session_id):
             return Reply(profile.missing_token_message, False, True)
         return None
@@ -528,13 +581,21 @@ def before(
         "capabilities": _capabilities(profile),
     }
     url = endpoint(config.server_url, "/v1/before")
-    reply = parse_reply(post(url, config.token, body, deadline.left(BEFORE_HTTP_TIMEOUT_S)))
+    timeout = deadline.left(BEFORE_HTTP_TIMEOUT_S)
+    reply = parse_reply(post(url, config.token, body, timeout, profile.plugin_version))
     if snapper is not None:
         snapper.join(deadline.left())  # a git still running is killed at exit
     if reply is not None and reply.block and not is_coach_command(event.prompt):
         reply = Reply(reply.message, False, reply.prompt_only)
     if reply is not None:
         store.set_server_prompt_only(reply.prompt_only)
+    if command and not (reply is not None and reply.block):
+        message = reply.message if reply is not None else None
+        reply = Reply(
+            message or COMMAND_NOT_ANSWERED,
+            True,
+            reply.prompt_only if reply is not None else prompt_only,
+        )
     if trees and not (reply is not None and reply.block):
         store.save_snapshot(event.session_id, event.prompt_id, trees[0])
     return reply
@@ -657,7 +718,8 @@ def after(event: TurnEnded, config: Config, profile: AgentProfile) -> Reply | No
         "capabilities": _capabilities(profile),
     }
     url = endpoint(config.server_url, "/v1/after")
-    reply = parse_reply(post(url, config.token, body, deadline.left(AFTER_HTTP_TIMEOUT_S)))
+    timeout = deadline.left(AFTER_HTTP_TIMEOUT_S)
+    reply = parse_reply(post(url, config.token, body, timeout, profile.plugin_version))
     if reply is None:
         return None
     store.set_server_prompt_only(reply.prompt_only)

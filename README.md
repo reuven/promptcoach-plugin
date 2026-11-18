@@ -23,9 +23,15 @@ and Claude never acts on it by itself.
 4. Turn on auto-update: `/plugin` → Marketplaces → promptcoach → enable
    auto-update. Third-party marketplaces don't update on their own.
 
-The hooks need `python3` 3.9 or newer on your `PATH` (the one macOS ships
-is fine); if yours is older, the coach says so once per session and
-otherwise stays out of the way. Nothing else is installed: the hook code uses
+The hooks need Python 3.9 or newer: `python3` on macOS and Linux (the one
+macOS ships is fine), and on Windows the `py` launcher or a `python3` or
+`python` from python.org or uv (the Microsoft Store's `python3` alias isn't
+used: see [docs/windows.md](docs/windows.md), which also lists what is
+still to be checked by hand on Windows). If yours is older, the coach says
+so once per session and otherwise stays out of the way; with no Python at
+all, the hooks do nothing. Without Python 3.9 or newer nothing can keep a
+coach command from Claude either: `coach, quieter` then reaches Claude as
+an ordinary prompt and isn't applied. Nothing else is installed: the hook code uses
 only Python's standard library, and runs as `python3 -I`, so modules in your
 project (or on your `PYTHONPATH`) are never loaded into it.
 
@@ -146,17 +152,49 @@ you sign in at <https://coach.lernerpython.com/signin>.
 ## Time limits
 
 Each hook has one time budget for all its work: 2.5 seconds before a prompt
-(counted from the moment the hook starts) and 13.5 seconds at the end of a turn, inside Claude Code's own limits. A
+(counted from the moment Python starts) and 13.5 seconds at the end of a
+turn. Claude Code's own limits (5 and 20 seconds) leave room for the shell
+and Python to start, which takes longer on Windows. A
 slow git or a slow server means less coaching for that turn, never a stuck
 session. The server can keep a prompt from Claude only when the prompt is a
 coach command such as `coach, quieter`: the plugin checks that itself, and
-if it and the server disagree about a prompt, the prompt goes to Claude (the
-plugin fails open). If Claude Code stops a hook at its limit, any git the
+if the server asks to keep back a prompt that isn't a command, the prompt
+goes to Claude (the plugin fails open).
+
+A coach command fails the other way, closed: it never reaches Claude,
+whatever the coach replies. If the coach doesn't answer in time (the
+request times out, can't connect, gets a server error or a reply that
+isn't one) or is too busy to apply it, the command is kept from Claude
+anyway and you see "Coach: I didn't answer in time, so that command wasn't
+applied. Please send it again." Nothing changed, so send the command
+again. If the coach answers with a notice instead (sign in, or renew your
+membership), that notice is shown and the command is still kept from
+Claude. Before your token is set, a command is kept from Claude with a
+reminder to add it (`/plugin` → promptcoach → Configure). An ordinary
+prompt the coach doesn't answer in time just goes to Claude, with no
+coaching that turn. If Claude Code stops a hook at its limit, any git the
 hook started is stopped with it. A hook killed outright (`kill -9`) can't
 clean up: a git it started then runs to its end, which takes about as long
 as `git add -A` on your project (or until something stops it: it still obeys
 SIGTERM); it writes only the plugin's own private index file and
 unreferenced objects in `.git/objects`.
+
+## Versions
+
+The plugin's version is the coach server's version: they are released
+together, and every request names it (`X-Promptcoach-Plugin`). One test
+keeps `plugin.json`, `pyproject.toml` and the package's `__version__` the
+same.
+
+Versions are a strict subset of PEP 440, the server's own pattern: two to
+four release numbers, an optional `a`, `b` or `rc` pre-release and an
+optional `.devN` (so `1.0.0b1` is a version), at most 32 characters. The
+plugin only checks the pattern; the server orders versions, by PEP 440.
+
+**Release order: deploy the server first, then publish the plugin.** A
+plugin whose version the running server doesn't accept yet (a new pattern,
+a newer version than its minimum allows) gets a 422 on every request, so
+no coaching, until the server catches up.
 
 ## License
 
@@ -171,7 +209,7 @@ uv run ruff check
 uv run mypy
 uv run mypy --python-version 3.10 tests
 uv run pytest
-uv run --isolated --no-project --python 3.9 --with 'pytest<9' --with pytest-cov pytest
+uv run --isolated --no-project --python 3.9 --with 'pytest<9' --with pytest-cov --with hypothesis pytest
 claude plugin validate ./plugins/promptcoach --strict
 claude plugin validate .
 ```

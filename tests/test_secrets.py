@@ -172,6 +172,8 @@ def test_ordinary_text_is_kept(text: str) -> None:
         ("x" * 999 + "\n") * 1_000,
         "AKIA" * 250_000,
     ],
+    # The 1 MB strings must not be their own ids (see test_every_test_id_is_short).
+    ids=["a", "TOKEN", "sk-", "pem-header", "keywords", "x-lines", "AKIA"],
 )
 def test_redaction_is_linear(text: str) -> None:
     """1 MB in well under a second: a quadratic pattern would take minutes.

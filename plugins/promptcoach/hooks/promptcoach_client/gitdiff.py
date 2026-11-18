@@ -43,6 +43,11 @@ from .contract import MAX_DIFF_CHARS
 from .forbidden import exclude_pathspecs, is_forbidden_path
 
 GIT_TIMEOUT_S = 3.0
+# Windows has no process groups to kill, no signal masks and no
+# ``preexec_fn``: git runs in a new process group and is killed alone. A
+# module value, so tests can take either branch on any OS.
+WINDOWS = os.name == "nt"
+GIT_COMMAND: tuple[str, ...] = ("git",)  # git from PATH, as the agent runs it
 TRUNCATED = "\n[promptcoach: diff truncated]\n"
 _DIFF_BYTES = MAX_DIFF_CHARS * 4  # UTF-8 never needs more for the cap
 _SMALL_BYTES = 1_000_000  # rev-parse, write-tree, ls-files
@@ -132,14 +137,127 @@ _PENDING_TERM: set[int] = set()
 _STARTING = threading.RLock()
 
 
+class _WinJobs:  # pragma: no cover - Windows only; test_real_job_object_kills_a_process_tree
+    """Windows Job Objects through ctypes: a job set to kill every process in
+    it when its last handle closes, so git, and any git that a wrapper
+    ``git.exe`` started, ends with the job (or with the hook, if the hook is
+    killed outright and Windows closes its handles). Every call fails soft:
+    ``create`` returns None and the caller falls back to ``taskkill``.
+    """
+
+    def _kernel32(self) -> Any:
+        import ctypes
+
+        return ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+
+    def create(self) -> int | None:
+        import ctypes
+        from ctypes import wintypes
+
+        class Basic(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_int64),
+                ("PerJobUserTimeLimit", ctypes.c_int64),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class Extended(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", Basic),
+                ("IoInfo", ctypes.c_uint64 * 6),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        try:
+            k32 = self._kernel32()
+            k32.CreateJobObjectW.restype = wintypes.HANDLE
+            job = k32.CreateJobObjectW(None, None)
+            if not job:
+                return None
+            info = Extended()
+            info.BasicLimitInformation.LimitFlags = 0x2000  # KILL_ON_JOB_CLOSE
+            # 9: JobObjectExtendedLimitInformation
+            if not k32.SetInformationJobObject(
+                wintypes.HANDLE(job), 9, ctypes.byref(info), ctypes.sizeof(info)
+            ):
+                k32.CloseHandle(wintypes.HANDLE(job))
+                return None
+            return int(job)
+        except Exception:  # noqa: BLE001 - no ctypes, no kernel32: fall back
+            return None
+
+    def assign(self, job: int, proc: subprocess.Popen[bytes]) -> bool:
+        from ctypes import wintypes
+
+        try:
+            handle = wintypes.HANDLE(int(proc._handle))  # type: ignore[attr-defined]
+            return bool(self._kernel32().AssignProcessToJobObject(wintypes.HANDLE(job), handle))
+        except Exception:  # noqa: BLE001
+            return False
+
+    def terminate(self, job: int) -> None:
+        from ctypes import wintypes
+
+        with contextlib.suppress(Exception):
+            self._kernel32().TerminateJobObject(wintypes.HANDLE(job), 1)
+
+    def close(self, job: int) -> None:
+        from ctypes import wintypes
+
+        with contextlib.suppress(Exception):
+            self._kernel32().CloseHandle(wintypes.HANDLE(job))
+
+
+_JOBS: Any = _WinJobs()  # tests put a fake here
+_JOB_OF: dict[int, int] = {}  # git's pid -> its job, on Windows
+
+
+def _run_taskkill(argv: list[str], timeout: float) -> None:
+    """``taskkill /T /F``: the fallback when no job could be made. Never raises."""
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        subprocess.run(  # noqa: S603 - a fixed system tool and a pid
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout,
+            check=False,
+        )
+
+
+def _kill_pid(pid: int) -> None:
+    """Kill a git and what it started: its process group on POSIX; on
+    Windows its job, else ``taskkill /T`` and TerminateProcess."""
+    if WINDOWS:
+        job = _JOB_OF.get(pid)
+        if job is not None:
+            _JOBS.terminate(job)
+            return
+        _run_taskkill(["taskkill", "/T", "/F", "/PID", str(pid)], 1.0)
+        with contextlib.suppress(OSError):
+            os.kill(pid, signal.SIGTERM)  # TerminateProcess
+        return
+    with contextlib.suppress(OSError):
+        os.killpg(pid, signal.SIGKILL)
+
+
 def _kill_live() -> None:
     """Kill every git process group still running."""
     for pgid in list(_LIVE):
-        with contextlib.suppress(OSError):
-            os.killpg(pgid, signal.SIGKILL)
+        _kill_pid(pgid)
         _LIVE.discard(pgid)
 
 
+_READER_GRACE_S = 0.2  # after a kill, how long to wait for git's output to close
 _EXIT_WAIT_S = 0.3  # how long the exit cleanup waits for a git that is starting
 
 
@@ -162,7 +280,7 @@ def _on_term(signum: int, frame: object) -> None:
     before run_git blocked it can land inside git's start, in this thread.
     Then it waits, and run_git runs it again once git is in _LIVE.
     """
-    if signal.SIGTERM in signal.pthread_sigmask(signal.SIG_BLOCK, []):
+    if not WINDOWS and signal.SIGTERM in signal.pthread_sigmask(signal.SIG_BLOCK, []):
         _PENDING_TERM.add(threading.get_ident())
         return
     with _STARTING:
@@ -207,6 +325,19 @@ def _env(index_file: Path | None = None) -> dict[str, str]:
     return env
 
 
+def _start_options(windows: bool) -> dict[str, Any]:
+    """How git is started: in its own session with SIGTERM unblocked (POSIX),
+    or in a new process group (Windows, which has neither)."""
+    if windows:
+        return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200)}
+    return {
+        "start_new_session": True,
+        "preexec_fn": functools.partial(
+            signal.pthread_sigmask, signal.SIG_UNBLOCK, (signal.SIGTERM,)
+        ),
+    }
+
+
 def run_git(
     args: list[str],
     cwd: Path,
@@ -228,34 +359,43 @@ def run_git(
     # lock, from git's start until it is in _LIVE: a stop then always finds
     # it. git itself gets SIGTERM unblocked, so an orphan (a hook killed with
     # SIGKILL) still obeys a later SIGTERM.
-    mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+    windows = WINDOWS
+    mask = None if windows else signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
     try:
         with _STARTING:
             # git from PATH, as the agent runs it; the arguments are ours alone.
             proc = subprocess.Popen(  # noqa: S603
-                ["git", "--no-pager", *_SAFE_CONFIG, *args],  # noqa: S607
+                [*GIT_COMMAND, "--no-pager", *_SAFE_CONFIG, *args],
                 cwd=cwd,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 env=_env(index_file),
-                start_new_session=True,
-                preexec_fn=functools.partial(
-                    signal.pthread_sigmask, signal.SIG_UNBLOCK, (signal.SIGTERM,)
-                ),
+                **_start_options(windows),
             )
             _LIVE.add(proc.pid)
+            if windows:
+                _add_job(proc)
     except OSError:  # git missing, cwd gone
         return None
     finally:
-        signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+        if mask is not None:
+            signal.pthread_sigmask(signal.SIG_SETMASK, mask)
         if threading.get_ident() in _PENDING_TERM:
             _PENDING_TERM.discard(threading.get_ident())
             _on_term(signal.SIGTERM, None)
     chunks: list[bytes] = []
     stdout = proc.stdout
     assert stdout is not None  # noqa: S101 - PIPE always sets it
-    reader = threading.Thread(target=lambda: chunks.append(stdout.read(limit + 1)), daemon=True)
+
+    def read() -> None:
+        try:
+            with contextlib.suppress(Exception):  # a thread's error would print to stderr
+                chunks.append(stdout.read(limit + 1))
+        finally:
+            stdout.close()  # here too: a read still blocked at the end is closed when it ends
+
+    reader = threading.Thread(target=read, daemon=True)
     deadline = time.monotonic() + timeout
     reader.start()
     reader.join(timeout)
@@ -263,24 +403,40 @@ def run_git(
     try:
         if reader.is_alive() or truncated:
             _kill(proc)
-            reader.join(1.0)  # the pipe closes with the group, so this returns at once
+            # The pipe closes with git's group (POSIX) or job; if something
+            # still holds it (a wrapper's child on Windows), stop waiting.
+            reader.join(_READER_GRACE_S)
         code = proc.wait(max(deadline - time.monotonic(), 0.1))
     except subprocess.TimeoutExpired:  # git closed its output but kept running
         _kill(proc)
         proc.wait()
         return None
     finally:
-        stdout.close()
+        if not reader.is_alive():  # closing under a blocked read would wait for it
+            stdout.close()
         _LIVE.discard(proc.pid)
+        job = _JOB_OF.pop(proc.pid, None)
+        if job is not None:
+            _JOBS.close(job)  # kills whatever is left in it
     if not chunks or (code != 0 and not truncated):
         return None
     return GitOutput(chunks[0][:limit].decode("utf-8", errors="replace"), truncated)
 
 
+def _add_job(proc: subprocess.Popen[bytes]) -> None:
+    """Put a just-started git in a kill-on-close job (Windows)."""
+    job = _JOBS.create()
+    if job is None:
+        return
+    if _JOBS.assign(job, proc):
+        _JOB_OF[proc.pid] = job
+    else:
+        _JOBS.close(job)
+
+
 def _kill(proc: subprocess.Popen[bytes]) -> None:
-    """Kill git and everything it started (its process group)."""
-    with contextlib.suppress(OSError):
-        os.killpg(proc.pid, signal.SIGKILL)
+    """Kill git and everything it started (its process group, or its job)."""
+    _kill_pid(proc.pid)
     proc.kill()
 
 
@@ -346,14 +502,27 @@ def _read_control(path: Path) -> tuple[bool, str]:
     ``(False, "")``: the caller then refuses, so nothing can make the hook
     block on a read.
     """
+    nofollow, nonblock = getattr(os, "O_NOFOLLOW", None), getattr(os, "O_NONBLOCK", None)
+    checked = None
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        # Windows has no such flags (and no FIFOs): refuse a symlink, or
+        # anything else not a regular file, before opening it, and then
+        # make sure the file opened is the one checked.
+        if nofollow is None or nonblock is None:
+            checked = os.lstat(path)
+            if not stat.S_ISREG(checked.st_mode):
+                return False, ""
+        flags = os.O_RDONLY | (nofollow or 0) | (nonblock or 0) | getattr(os, "O_BINARY", 0)
+        fd = os.open(path, flags)
     except FileNotFoundError:
         return True, ""
     except OSError:
         return False, ""
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
+            return False, ""
+        if checked is not None and not os.path.samestat(checked, opened):
             return False, ""
         data = os.read(fd, _CONTROL_BYTES + 1)
     finally:

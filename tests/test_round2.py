@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from conftest import StubServer, git, prompt_payload, run_hook, stop_payload
+from conftest import StubServer, child_env, git, posix_only, prompt_payload, run_hook, stop_payload
 from promptcoach_client import core, gitdiff
 from promptcoach_client.contract import MAX_OUTPUT_CHARS
 from promptcoach_client.redact import prints_secrets, redact
@@ -45,7 +45,7 @@ def _after_in_a_child(cwd: Path, env: dict[str, str]) -> float:
         input=json.dumps(payload),
         capture_output=True,
         text=True,
-        env={"PATH": os.environ["PATH"], **env, "CLAUDE_PROJECT_DIR": str(cwd)},
+        env=child_env({**env, "CLAUDE_PROJECT_DIR": str(cwd)}),
         timeout=25,
         check=False,
     )
@@ -56,6 +56,7 @@ def _after_in_a_child(cwd: Path, env: dict[str, str]) -> float:
 # --- R1: a FIFO where git control files belong never hangs the hook ----------------------
 
 
+@posix_only("test_windows.py::test_read_control_without_posix_open_flags", "FIFOs")
 def test_fifo_alternates_returns_in_time_with_no_diff(
     server: StubServer, env: dict[str, str], repo: Path, data_dir: Path
 ) -> None:
@@ -68,6 +69,7 @@ def test_fifo_alternates_returns_in_time_with_no_diff(
     assert _diffs(server) == [None]
 
 
+@posix_only("test_windows.py::test_read_control_without_posix_open_flags", "FIFOs")
 def test_fifo_worktree_gitdir_returns_in_time_with_no_diff(
     server: StubServer, env: dict[str, str], repo: Path, data_dir: Path, tmp_path: Path
 ) -> None:
@@ -87,6 +89,7 @@ def test_fifo_worktree_gitdir_returns_in_time_with_no_diff(
     assert _diffs(server) == [None]
 
 
+@posix_only("test_windows.py::test_read_control_without_posix_open_flags", "FIFOs")
 def test_read_control(tmp_path: Path) -> None:
     os.mkfifo(tmp_path / "fifo")
     (tmp_path / "big").write_text("x" * 5_000)
@@ -100,6 +103,7 @@ def test_read_control(tmp_path: Path) -> None:
         assert gitdiff._read_control(tmp_path / bad) == (False, ""), bad
 
 
+@posix_only("test_windows.py::test_read_control_without_posix_open_flags", "FIFOs")
 def test_read_control_never_blocks_on_a_fifo(tmp_path: Path) -> None:
     """Fails in 2 s, not never: opening a FIFO without O_NONBLOCK blocks forever."""
     os.mkfifo(tmp_path / "fifo")
@@ -117,6 +121,7 @@ def test_read_control_never_blocks_on_a_fifo(tmp_path: Path) -> None:
     assert results == [(False, "")]
 
 
+@posix_only("test_windows.py::test_read_control_without_posix_open_flags", "FIFOs")
 def test_any_special_file_in_the_git_dir_means_no_diff(
     server: StubServer, env: dict[str, str], repo: Path, data_dir: Path
 ) -> None:
@@ -600,6 +605,7 @@ def test_the_hook_installs_git_cleanup(
     assert calls == [True]
 
 
+@posix_only("test_windows.py::test_windows_kill_live_terminates_each_process", "process groups")
 def test_kill_live_groups(tmp_path: Path) -> None:
     proc = subprocess.Popen(["sleep", "30"], start_new_session=True)
     gitdiff._LIVE.add(proc.pid)
@@ -621,6 +627,10 @@ gitdiff.run_git(["status"], pathlib.Path(sys.argv[2]), timeout=30)
 """
 
 
+@posix_only(
+    "test_windows.py::test_windows_kill_live_terminates_each_process",
+    "SIGTERM and a git written in sh",
+)
 def test_sigterm_kills_the_running_git(tmp_path: Path) -> None:
     pid_file = tmp_path / "git.pid"
     fake = tmp_path / "bin"
@@ -629,7 +639,7 @@ def test_sigterm_kills_the_running_git(tmp_path: Path) -> None:
     (fake / "git").chmod(0o755)
     child = subprocess.Popen(
         [sys.executable, "-I", "-c", SIGTERM_CHILD, str(HOOK.parent), str(tmp_path)],
-        env={"PATH": f"{fake}{os.pathsep}{os.environ['PATH']}"},
+        env=child_env(path=f"{fake}{os.pathsep}{os.environ['PATH']}"),
     )
     deadline = time.monotonic() + 10
     while not pid_file.exists() or not pid_file.read_text().strip():
