@@ -10,6 +10,8 @@ import sys
 import sysconfig
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / "plugins" / "promptcoach"
 CLIENT = PLUGIN / "hooks" / "promptcoach_client"
@@ -63,9 +65,11 @@ def test_core_never_names_claude_code() -> None:
                 ]
 
 
-def _is_stdlib(name: str) -> bool:
-    """In the standard library (Python 3.9 has no ``sys.stdlib_module_names``)."""
-    names = getattr(sys, "stdlib_module_names", None)
+def _is_stdlib(
+    name: str, names: frozenset[str] | None = getattr(sys, "stdlib_module_names", None)
+) -> bool:
+    """In the standard library (Python 3.9 has no ``sys.stdlib_module_names``;
+    ``names=None`` runs that fallback on any Python)."""
     if names is not None:
         return name in names
     spec = importlib.util.find_spec(name)
@@ -74,6 +78,25 @@ def _is_stdlib(name: str) -> bool:
     return origin in {"built-in", "frozen"} or (
         origin is not None and origin.startswith(stdlib) and "site-packages" not in origin
     )
+
+
+@pytest.mark.parametrize("sysconfig_stdlib", ["as-is", "elsewhere"])
+def test_the_39_stdlib_check_works_everywhere(
+    sysconfig_stdlib: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fallback for Python 3.9 (no ``sys.stdlib_module_names``), run on
+    every Python through ``names=None``. On Windows in a uv venv,
+    sysconfig's stdlib path is spelled differently from (or isn't) where
+    the modules load from, so it must not be what the check relies on."""
+    if sysconfig_stdlib == "elsewhere":
+        real = sysconfig.get_paths()
+        monkeypatch.setattr(
+            sysconfig, "get_paths", lambda *a, **k: {**real, "stdlib": "C:\\Other\\Lib"}
+        )
+    for name in ("__future__", "json", "os", "ctypes", "sys", "time"):
+        assert _is_stdlib(name, names=None), name
+    for name in ("pytest", "hypothesis", "no_such_module_anywhere"):
+        assert not _is_stdlib(name, names=None), name
 
 
 def test_hook_code_is_stdlib_only() -> None:
