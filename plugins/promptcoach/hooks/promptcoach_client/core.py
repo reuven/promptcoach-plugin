@@ -257,30 +257,39 @@ _OPENER = urllib.request.build_opener(_NoRedirect)
 
 
 def post(
-    url: str | None, token: str, body: dict[str, Any], timeout: float
+    url: str | None,
+    token: str,
+    body: dict[str, Any],
+    timeout: float,
+    version: str | None = None,
 ) -> dict[str, Any] | None:
     """POST ``body`` as JSON; the reply object, or None on any problem.
 
     ``timeout`` bounds the whole call (name lookup and a slow, trickling
     server included), not only each socket read: the request runs in a
     daemon thread that the hook simply stops waiting for. Any error in that
-    thread ends it quietly (nothing on stderr).
+    thread ends it quietly (nothing on stderr). ``version``, the plugin's,
+    goes in the ``X-Promptcoach-Plugin`` header, so the server can tell
+    which release asked even before it reads the body.
     """
     if url is None or timeout <= 0:
         return None
     body = valid_text(body)
     result: list[dict[str, Any]] = []
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {token}",
+        "User-Agent": "promptcoach-client",
+    }
+    if version is not None:
+        headers["X-Promptcoach-Plugin"] = version
 
     def call() -> None:
         request = urllib.request.Request(  # noqa: S310 - endpoint() allows only http(s)
             url,
             data=json.dumps(body).encode(),
             method="POST",
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {token}",
-                "User-Agent": "promptcoach-client",
-            },
+            headers=headers,
         )
         try:
             with _OPENER.open(request, timeout=timeout) as response:
@@ -549,7 +558,8 @@ def before(
         "capabilities": _capabilities(profile),
     }
     url = endpoint(config.server_url, "/v1/before")
-    reply = parse_reply(post(url, config.token, body, deadline.left(BEFORE_HTTP_TIMEOUT_S)))
+    timeout = deadline.left(BEFORE_HTTP_TIMEOUT_S)
+    reply = parse_reply(post(url, config.token, body, timeout, profile.plugin_version))
     if snapper is not None:
         snapper.join(deadline.left())  # a git still running is killed at exit
     if reply is not None and reply.block and not is_coach_command(event.prompt):
@@ -685,7 +695,8 @@ def after(event: TurnEnded, config: Config, profile: AgentProfile) -> Reply | No
         "capabilities": _capabilities(profile),
     }
     url = endpoint(config.server_url, "/v1/after")
-    reply = parse_reply(post(url, config.token, body, deadline.left(AFTER_HTTP_TIMEOUT_S)))
+    timeout = deadline.left(AFTER_HTTP_TIMEOUT_S)
+    reply = parse_reply(post(url, config.token, body, timeout, profile.plugin_version))
     if reply is None:
         return None
     store.set_server_prompt_only(reply.prompt_only)
