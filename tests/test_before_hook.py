@@ -590,3 +590,74 @@ def test_every_request_names_the_plugin_version(
     for req in server.requests:
         assert req.headers["X-Promptcoach-Plugin"] == __version__
         assert [k for k, v in req.headers.items() if __version__ in v] == ["X-Promptcoach-Plugin"]
+
+
+# --- a command is blocked on every path that can't ask the server -------------------------
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [{"session_id": "s/1"}, {"prompt_id": "p 1"}, {"prompt_id": None}, {"session_id": 7}],
+    ids=["slash-session", "space-prompt", "no-prompt-id", "number-session"],
+)
+@pytest.mark.parametrize("prompt", ["coach, quieter", "add a test"])
+def test_bad_ids_block_a_command_and_stay_silent_otherwise(
+    changes: dict[str, object], prompt: str, server: StubServer, env: dict[str, str], project: Path
+) -> None:
+    payload = {**prompt_payload(project, prompt), **changes}
+    if changes.get("prompt_id", "") is None:
+        del payload["prompt_id"]
+
+    out = run_hook("before", payload, env)
+
+    assert out == (json.dumps(NOT_ANSWERED) if prompt.startswith("coach") else "")
+    assert server.requests == []
+
+
+@pytest.mark.parametrize("prompt", ["coach, quieter", "add a test"])
+def test_an_internal_error_blocks_a_command_and_stays_silent_otherwise(
+    prompt: str, env: dict[str, str], project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(core, "before", broken)
+
+    out = run_hook("before", prompt_payload(project, prompt), env)
+
+    assert out == (json.dumps(NOT_ANSWERED) if prompt.startswith("coach") else "")
+
+
+def test_an_error_after_the_reply_is_written_writes_nothing_more(
+    server: StubServer, env: dict[str, str], project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server.reply = {"message": "Coach: quieter now.", "block_prompt": True, "prompt_only": False}
+    real = claude_code.emit
+
+    def emit_then_fail(*args: Any, **kwargs: Any) -> None:
+        real(*args, **kwargs)
+        raise RuntimeError("after writing")
+
+    monkeypatch.setattr(claude_code, "emit", emit_then_fail)
+
+    out = run_hook("before", prompt_payload(project, "coach, quieter"), env)
+
+    assert json.loads(out) == {"decision": "block", "reason": "Coach: quieter now."}
+
+
+def test_a_command_is_never_blocked_at_the_end_of_a_turn_by_an_error(
+    env: dict[str, str], project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload = {**stop_payload(project), "prompt": "coach, quieter", "prompt_id": None}
+
+    assert run_hook("after", payload, env) == ""
+
+
+def test_a_byte_order_mark_on_stdin_is_ignored(
+    server: StubServer, env: dict[str, str], project: Path
+) -> None:
+    server.reply = {"message": "Coach: quieter now.", "block_prompt": True, "prompt_only": False}
+
+    out = run_hook("before", "﻿" + json.dumps(prompt_payload(project, "coach, quieter")), env)
+
+    assert json.loads(out) == {"decision": "block", "reason": "Coach: quieter now."}

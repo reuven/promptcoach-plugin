@@ -6,6 +6,7 @@ tests set it, so both branches run (and count for coverage) on every OS.
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import os
@@ -20,7 +21,7 @@ from typing import Any
 import pytest
 
 import coach_hook
-from conftest import StubServer, prompt_payload, run_hook
+from conftest import StubServer, posix_only, prompt_payload, run_hook
 from promptcoach_client import claude_code, gitdiff
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -157,8 +158,42 @@ def test_read_control_without_posix_open_flags(
     try:
         (tmp_path / "link").symlink_to(tmp_path / "ok")
     except OSError:  # Windows without the symlink privilege
-        return
+        pytest.skip("no symlink privilege here; the checks above ran, the symlink case didn't")
     assert gitdiff._read_control(tmp_path / "link") == (False, "")
+
+
+def test_read_control_refuses_a_file_swapped_after_its_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without O_NOFOLLOW the lstat and the open are two steps: the opened
+    file must be the one that was checked."""
+    monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+    monkeypatch.delattr(os, "O_NONBLOCK", raising=False)
+    (tmp_path / "ok").write_text("../..\n")
+    (tmp_path / "other").write_text("elsewhere\n")
+    real_lstat = os.lstat
+    monkeypatch.setattr(os, "lstat", lambda path: real_lstat(tmp_path / "other"))
+
+    assert gitdiff._read_control(tmp_path / "ok") == (False, "")
+
+
+def test_read_control_opens_in_binary_mode_where_there_is_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows' O_BINARY: no CRLF translation of the control file."""
+    flags: list[int] = []
+    real_open = os.open
+
+    def opened(path: Any, flag: int, *args: Any) -> int:
+        flags.append(flag)
+        return real_open(path, flag & ~0x8000, *args)
+
+    monkeypatch.setattr(os, "O_BINARY", 0x8000, raising=False)
+    monkeypatch.setattr(os, "open", opened)
+    (tmp_path / "ok").write_text("x\n")
+
+    assert gitdiff._read_control(tmp_path / "ok") == (True, "x\n")
+    assert flags and all(f & 0x8000 for f in flags)
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no FIFOs on Windows to open")
@@ -295,3 +330,171 @@ def test_unwritable_data_dir_still_blocks(
     out = run_hook("before", prompt_payload(project, "coach, quieter"), env)
 
     assert json.loads(out) == {"decision": "block", "reason": "Coach: quieter now."}
+
+
+# --- a git that won't die: its children hold the pipe -------------------------------------
+
+# A stand-in git that starts a grandchild holding stdout, writes its pid, and waits.
+GRANDCHILD_GIT = (
+    "import subprocess, sys, time\n"
+    "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+    "open(sys.argv[1], 'w').write(str(child.pid))\n"
+    "time.sleep(30)\n"
+)
+
+
+def _grandchild_git(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    script = tmp_path / "git.py"
+    script.write_text(GRANDCHILD_GIT)
+    pid_file = tmp_path / "grandchild.pid"
+    monkeypatch.setattr(gitdiff, "GIT_COMMAND", (sys.executable, str(script), str(pid_file)))
+    return pid_file
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _reap(pid_file: Path) -> None:
+    if pid_file.exists():
+        with contextlib.suppress(OSError):
+            os.kill(int(pid_file.read_text()), signal.SIGTERM)
+
+
+class FakeJobs:
+    """The Job Object layer, faked: records calls; terminate kills what was
+    assigned (and, as a real job would, the grandchild)."""
+
+    def __init__(self, pid_file: Path | None = None, create_ok: bool = True) -> None:
+        self.calls: list[tuple[str, Any]] = []
+        self.pid_file = pid_file
+        self.create_ok = create_ok
+
+    def create(self) -> int | None:
+        self.calls.append(("create", None))
+        return 42 if self.create_ok else None
+
+    def assign(self, job: int, proc: subprocess.Popen[bytes]) -> bool:
+        self.calls.append(("assign", proc.pid))
+        return True
+
+    def terminate(self, job: int) -> None:
+        self.calls.append(("terminate", job))
+        for name, pid in self.calls:
+            if name == "assign":
+                with contextlib.suppress(OSError):
+                    os.kill(pid, signal.SIGTERM)
+
+    def close(self, job: int) -> None:
+        self.calls.append(("close", job))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="on Windows the real Job Object test runs instead")
+def test_windows_timeout_terminates_the_job_and_returns_by_the_deadline(
+    windows: list[tuple[str, Any]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The grandchild keeps the pipe open (the fake can't kill it, as a
+    wrapper git.exe's real git): run_git still returns on time."""
+    pid_file = _grandchild_git(tmp_path, monkeypatch)
+    jobs = FakeJobs()
+    monkeypatch.setattr(gitdiff, "_JOBS", jobs)
+    try:
+        started = time.monotonic()
+        assert gitdiff.run_git(["status"], tmp_path, timeout=1.0) is None
+        assert time.monotonic() - started < 2.5
+    finally:
+        _reap(pid_file)
+    names = [name for name, _ in jobs.calls]
+    assert names == ["create", "assign", "terminate", "close"]
+    assert not gitdiff._LIVE and not gitdiff._JOB_OF
+
+
+def test_windows_git_that_finishes_closes_its_job(
+    repo: Path, windows: list[tuple[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    jobs = FakeJobs()
+    monkeypatch.setattr(gitdiff, "_JOBS", jobs)
+
+    assert gitdiff.run_git(["rev-parse", "--is-inside-work-tree"], repo) is not None
+    assert [name for name, _ in jobs.calls] == ["create", "assign", "close"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="on Windows the real Job Object test runs instead")
+def test_windows_without_a_job_falls_back_to_taskkill(
+    windows: list[tuple[str, Any]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pid_file = _grandchild_git(tmp_path, monkeypatch)
+    monkeypatch.setattr(gitdiff, "_JOBS", FakeJobs(create_ok=False))
+    ran: list[list[str]] = []
+    monkeypatch.setattr(gitdiff, "_run_taskkill", lambda argv, timeout: ran.append(argv))
+    try:
+        assert gitdiff.run_git(["status"], tmp_path, timeout=0.5) is None
+    finally:
+        _reap(pid_file)
+    assert len(ran) == 1
+    assert ran[0][:4] == ["taskkill", "/T", "/F", "/PID"]
+
+
+def test_windows_kill_live_terminates_jobs_first(
+    windows: list[tuple[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    jobs = FakeJobs()
+    killed: list[int] = []
+    monkeypatch.setattr(gitdiff, "_JOBS", jobs)
+    monkeypatch.setattr(gitdiff, "_JOB_OF", {111: 7})
+    monkeypatch.setattr(gitdiff, "_LIVE", {111, 222})
+    monkeypatch.setattr(os, "kill", lambda pid, sig: killed.append(pid))
+    monkeypatch.setattr(gitdiff, "_run_taskkill", lambda argv, timeout: None)
+
+    gitdiff._kill_live()
+
+    assert ("terminate", 7) in jobs.calls
+    assert 222 in killed
+
+
+def test_run_taskkill_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    def missing(*args: Any, **kwargs: Any) -> None:
+        raise FileNotFoundError("taskkill")
+
+    monkeypatch.setattr(subprocess, "run", missing)
+    gitdiff._run_taskkill(["taskkill", "/T", "/F", "/PID", "1"], 1.0)
+
+
+@posix_only("test_windows_timeout_terminates_the_job_and_returns_by_the_deadline", "killpg")
+def test_posix_timeout_kills_the_grandchild_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pid_file = _grandchild_git(tmp_path, monkeypatch)
+    try:
+        started = time.monotonic()
+        assert gitdiff.run_git(["status"], tmp_path, timeout=1.0) is None
+        assert time.monotonic() - started < 2.5
+        deadline = time.monotonic() + 3
+        while _alive(int(pid_file.read_text())) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not _alive(int(pid_file.read_text()))
+    finally:
+        _reap(pid_file)
+
+
+@pytest.mark.skipif(
+    os.name != "nt",
+    reason="the real Job Object needs Windows; elsewhere "
+    "test_windows_timeout_terminates_the_job_and_returns_by_the_deadline runs it faked",
+)
+def test_real_job_object_kills_a_process_tree(tmp_path: Path) -> None:  # pragma: no cover
+    jobs = gitdiff._WinJobs()
+    job = jobs.create()
+    assert job is not None
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        assert jobs.assign(job, proc)
+        jobs.terminate(job)
+        assert proc.wait(5) is not None
+    finally:
+        jobs.close(job)
+        proc.kill()

@@ -90,3 +90,20 @@ def test_run_hands_over_to_the_client(env: dict[str, str], project: Path) -> Non
     out = io.StringIO()
     assert coach_hook.run(["record"], io.StringIO("{}"), out, env) == 0
     assert out.getvalue() == ""
+
+
+def test_a_broken_install_still_exits_0(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A half-updated plugin (the client won't import) is silence, not exit 1."""
+    monkeypatch.setitem(sys.modules, "promptcoach_client.claude_code", None)
+    out = io.StringIO()
+
+    assert coach_hook.run(["before"], io.StringIO("{}"), out, {}) == 0
+    assert out.getvalue() == ""
+
+
+def test_stdin_with_a_byte_order_mark_reads_without_it() -> None:
+    stdin = io.TextIOWrapper(io.BytesIO(b"\xef\xbb\xbf{}"), encoding="cp1252")
+
+    coach_hook.utf8(stdin, "utf-8-sig")
+
+    assert stdin.read() == "{}"
