@@ -204,16 +204,22 @@ def test_local_runs_keep_the_100_percent_gate() -> None:
 
 
 def test_ci_names_a_hung_test() -> None:
-    """A hang is self-reporting: -v prints each test before it runs, and the
-    conftest backstop's log (every thread's stack) is printed when a cell
-    fails, well inside the job's time limit."""
+    """A hang is self-reporting and leaves a log: -v prints each test before
+    it runs; the pytest step has its own timeout, so a hang fails that step
+    (GitHub keeps the log) instead of cancelling the job (which keeps none);
+    and the hang log is printed after it whatever happened."""
     check = _ci_jobs()["check"]
-    assert "PROMPTCOACH_HANG_LOG: ${{ runner.temp }}/pytest-hang.log" in check
+    step = re.search(r"- run: uv run pytest .*?(?=\n      - )", check, re.S)
+    assert step is not None
+    assert "PROMPTCOACH_HANG_LOG: ${{ runner.temp }}/pytest-hang.log" in step.group(0)
+    step_minutes = int(re.search(r"timeout-minutes: (\d+)", step.group(0)).group(1))  # type: ignore[union-attr]
     assert re.search(
-        r"if: \$\{\{ failure\(\) \}\}\n\s+shell: bash\n\s+run: .*pytest-hang\.log", check
+        r"if: \$\{\{ always\(\) \}\}\n\s+shell: bash\n\s+run: .*pytest-hang\.log", check
     )
+    job_minutes = int(re.search(r"^    timeout-minutes: (\d+)", check, re.M).group(1))  # type: ignore[union-attr]
     import conftest
 
-    minutes = int(re.search(r"timeout-minutes: (\d+)", check).group(1))  # type: ignore[union-attr]
-    # Windows' suite takes about 5 minutes; one backstop adds HARD_LIMIT_S.
-    assert minutes * 60 >= 5 * 60 + conftest.HARD_LIMIT_S + 5 * 60
+    # The suite takes about 5 minutes; one backstop adds HARD_LIMIT_S; the
+    # step's limit sits above both, and the job's above the step and the rest.
+    assert step_minutes * 60 >= 5 * 60 + conftest.HARD_LIMIT_S
+    assert job_minutes >= step_minutes + 5
