@@ -156,8 +156,8 @@ def test_ci_gates_coverage_on_the_union_of_every_cell() -> None:
     # Every cell runs one pytest command, the same everywhere, keeping its data
     # under its own name and uploading it even when a test failed.
     assert "COVERAGE_FILE: .coverage.${{ matrix.os }}-${{ matrix.python }}" in check
-    [pytest_step] = re.findall(r"- run: (uv run pytest.*)", check)
-    assert pytest_step == "uv run pytest -v --cov-fail-under=0"
+    [pytest_step] = re.findall(r"- run: (.*uv run pytest.*)", check)
+    assert pytest_step.endswith(" -- uv run pytest -v --cov-fail-under=0")
     assert "runner.os" not in check and "matrix.os ==" not in check
     assert "continue-on-error" not in check
     assert re.search(r"actions/upload-artifact@[0-9a-f]{40}", check)
@@ -204,22 +204,51 @@ def test_local_runs_keep_the_100_percent_gate() -> None:
 
 
 def test_ci_names_a_hung_test() -> None:
-    """A hang is self-reporting and leaves a log: -v prints each test before
-    it runs; the pytest step has its own timeout, so a hang fails that step
-    (GitHub keeps the log) instead of cancelling the job (which keeps none);
-    and the hang log is printed after it whatever happened."""
+    """A hang leaves evidence whatever it is. tools/ci_run.py runs pytest in
+    its own process group and SIGKILLs the group (taskkill /T on Windows) at
+    its deadline, which no masked or ignored signal survives; its output and
+    the hang log are printed and uploaded after it, whatever happened. The
+    step's and the job's own limits sit above the runner's deadline."""
     check = _ci_jobs()["check"]
-    step = re.search(r"- run: uv run pytest .*?(?=\n      - )", check, re.S)
-    assert step is not None
-    assert "PROMPTCOACH_HANG_LOG: ${{ runner.temp }}/pytest-hang.log" in step.group(0)
-    step_minutes = int(re.search(r"timeout-minutes: (\d+)", step.group(0)).group(1))  # type: ignore[union-attr]
-    assert re.search(
-        r"if: \$\{\{ always\(\) \}\}\n\s+shell: bash\n\s+run: .*pytest-hang\.log", check
+    step = re.search(
+        r"- run: (uv run python tools/ci_run\.py .*?)\n(.*?)(?=\n      - )", check, re.S
     )
+    assert step is not None
+    command, rest = step.group(1), step.group(2)
+    out = "${{ runner.temp }}/pytest-output.log"
+    assert f'--output "{out}"' in command
+    deadline = int(re.search(r"--deadline (\d+)", command).group(1))  # type: ignore[union-attr]
+    assert "PROMPTCOACH_HANG_LOG: ${{ runner.temp }}/pytest-hang.log" in rest
+    step_minutes = int(re.search(r"timeout-minutes: (\d+)", rest).group(1))  # type: ignore[union-attr]
     job_minutes = int(re.search(r"^    timeout-minutes: (\d+)", check, re.M).group(1))  # type: ignore[union-attr]
     import conftest
 
-    # The suite takes about 5 minutes; one backstop adds HARD_LIMIT_S; the
-    # step's limit sits above both, and the job's above the step and the rest.
-    assert step_minutes * 60 >= 5 * 60 + conftest.HARD_LIMIT_S
+    # The suite takes about 5 minutes; one watchdog dump adds HARD_LIMIT_S.
+    assert deadline >= 5 * 60 + conftest.HARD_LIMIT_S
+    assert step_minutes * 60 >= deadline + 60
     assert job_minutes >= step_minutes + 5
+    printed = re.search(
+        r"if: \$\{\{ always\(\) \}\}\n\s+shell: bash\n\s+run: \|\n(.*?)(?=\n      - )", check, re.S
+    )
+    assert printed is not None
+    assert 'tail -n 300 "$RUNNER_TEMP/pytest-output.log"' in printed.group(1)
+    assert 'tail -n 200 "$RUNNER_TEMP/pytest-hang.log"' in printed.group(1)
+    upload = re.search(
+        r"- uses: actions/upload-artifact@[0-9a-f]{40} # \S+\n\s+if: \$\{\{ always\(\) \}\}\n"
+        r"\s+with:\n\s+name: pytest-logs-\$\{\{ matrix\.os \}\}-\$\{\{ matrix\.python \}\}\n"
+        r"\s+path: \|\n\s+\$\{\{ runner\.temp \}\}/pytest-output\.log\n"
+        r"\s+\$\{\{ runner\.temp \}\}/pytest-hang\.log",
+        check,
+    )
+    assert upload is not None
+
+
+def test_ci_run_is_stdlib_only() -> None:
+    tree = ast.parse((ROOT / "tools" / "ci_run.py").read_text())
+    imported = {
+        a.name.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names
+    }
+    imported |= {
+        n.module.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module
+    }
+    assert imported <= set(sys.stdlib_module_names) | {"__future__"}  # type: ignore[attr-defined]

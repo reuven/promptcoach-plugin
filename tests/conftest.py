@@ -155,6 +155,19 @@ def _hard_limit(request: pytest.FixtureRequest) -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def _sigterm_left_alone() -> Iterator[None]:
+    """After each test, SIGTERM is unblocked in the main thread and its
+    handler is the one the test found: a test that leaks either would make
+    the whole run deaf to CI's stop signal."""
+    before = signal.getsignal(signal.SIGTERM)
+    yield
+    if hasattr(signal, "pthread_sigmask"):
+        blocked = signal.pthread_sigmask(signal.SIG_BLOCK, [])
+        assert signal.SIGTERM not in blocked, "the test left SIGTERM blocked"
+    assert signal.getsignal(signal.SIGTERM) == before, "the test left a SIGTERM handler"
+
+
+@pytest.fixture(autouse=True)
 def _per_test_timeout() -> Iterator[None]:
     TIMED_OUT.clear()
     if not hasattr(signal, "SIGALRM"):  # Windows

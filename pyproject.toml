@@ -23,7 +23,7 @@ dev = [
 
 [tool.pytest.ini_options]
 addopts = "--cov=promptcoach_client --cov=coach_hook --cov-branch --cov-report=term-missing --cov-fail-under=100 -p no:cacheprovider"
-pythonpath = ["plugins/promptcoach/hooks", "tests"]
+pythonpath = ["plugins/promptcoach/hooks", "tests", "tools"]
 testpaths = ["tests"]
 filterwarnings = ["error"]
 
@@ -47,8 +47,8 @@ show_missing = true
 # The hook code is checked as Python 3.9, its oldest supported version. The
 # tests import pytest, which needs 3.10+, so CI checks them in a second run:
 # `uv run mypy --python-version 3.10 tests`.
-files = ["plugins/promptcoach/hooks"]
-mypy_path = ["plugins/promptcoach/hooks", "tests"]
+files = ["plugins/promptcoach/hooks", "tools"]
+mypy_path = ["plugins/promptcoach/hooks", "tests", "tools"]
 explicit_package_bases = true
 python_version = "3.9"
 # Checked as Linux on every OS (CI runs on Windows too): the POSIX-only calls
