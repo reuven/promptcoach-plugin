@@ -16,7 +16,7 @@ concurrency:
 jobs:
   check:
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -43,12 +43,15 @@ jobs:
       # -v names each test before it runs; a test stuck past the conftest's
       # hard limit (150 s) dumps every thread's stack to the hang log and
       # ends the run, which the next step prints.
+      # The step's own limit: a hang fails this step and the steps after it
+      # still run and the log is kept (a job timeout cancels and keeps none).
       - run: uv run pytest -v --cov-fail-under=0
+        timeout-minutes: 10
         env:
           COVERAGE_FILE: .coverage.${{ matrix.os }}-${{ matrix.python }}
           PROMPTCOACH_HANG_LOG: ${{ runner.temp }}/pytest-hang.log
       - name: The last test that ran, and every thread's stack if one hung
-        if: ${{ failure() }}
+        if: ${{ always() }}
         shell: bash
         run: tail -n 200 "$RUNNER_TEMP/pytest-hang.log" || true
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
