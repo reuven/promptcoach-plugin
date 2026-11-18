@@ -64,18 +64,22 @@ reply, or pasted into a source file. The plugin filters the common ones
 before anything leaves your machine. A command that reads a credential file
 (`cat .env`, `source .env`, `< .env`, or a pattern such as `.env*` that could
 match one), expands a secret-named variable (`echo $OPENAI_API_KEY`), prints
-the environment (`env`, `printenv`, `export -p`, `os.environ`) or asks a tool
-for a secret (`gh auth token`, `kubectl get secret`, `docker compose config`)
-has its output dropped. Well-known token shapes (`sk-...`, `ghp_...`,
+the environment (`env`, `printenv`, `export -p`, `os.environ`, an inline
+`python -c`, `node -p` or `perl -e` script that reads it) or asks a tool for a
+secret (`gh auth token`, `kubectl get secret`, `docker compose config`,
+`aws configure get`, `vault read`) has its output dropped. Well-known token shapes (`sk-...`, `ghp_...`,
 `AKIA...`, `sk_live_...`, `hf_...`, JWTs, `Authorization:` headers, the
-password in `https://user:password@host`, `--password VALUE`,
-`mysql -pVALUE`, `curl -u user:pass`, `<password>...</password>`,
+password in `https://user:password@host`, `--password VALUE` (and
+`--db-password`, `--client-secret`...), `mysql -pVALUE`, `sshpass -p`,
+`curl -u user:pass`, `<password>...</password>`, a string compared with a
+secret's name (`password != "..."`, `"..." == password`),
 private-key blocks and the like)
 and the values of lines such as `DB_PASSWORD=...` or `api_key: ...` are
 replaced with `[REDACTED]` in commands, output, replies and diffs. Only a few
 plain code forms are left alone: a token count (`max_tokens=1024`), a name
-assigned to itself (`self.api_key = api_key`) and a call or lookup
-(`password = get_password()`, `os.environ["TOKEN"]`); an `UPPER_CASE` name
+assigned to itself (`self.api_key = api_key`), a call or lookup
+(`password = get_password()`, `os.environ["TOKEN"]`) and a comparison with a
+dotted name or a number (`token.start == token.end`); an `UPPER_CASE` name
 always loses its value. The server scrubs secrets again from everything it stores. This is a
 filter for the usual cases, not a guarantee: a secret in an unusual shape, or
 a command that hides what it reads (`eval`, a file name built from pieces or
@@ -149,8 +153,9 @@ if it and the server disagree about a prompt, the prompt goes to Claude (the
 plugin fails open). If Claude Code stops a hook at its limit, any git the
 hook started is stopped with it. A hook killed outright (`kill -9`) can't
 clean up: a git it started then runs to its end, which takes about as long
-as `git add -A` on your project; it writes only the plugin's own private
-index file and unreferenced objects in `.git/objects`.
+as `git add -A` on your project (or until something stops it: it still obeys
+SIGTERM); it writes only the plugin's own private index file and
+unreferenced objects in `.git/objects`.
 
 ## License
 
