@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -145,3 +146,72 @@ def test_main_parses_its_arguments(tmp_path: Path, capsys: pytest.CaptureFixture
 def test_main_needs_a_command(tmp_path: Path) -> None:
     with pytest.raises(SystemExit):
         ci_run.main(["--output", str(tmp_path / "o"), "--deadline", "30", "--"])
+
+
+# --- the process count of the group, and a cap on it ----------------------------------------
+
+PS_OUTPUT = """  PID  PGID
+    1     1
+  500   500
+  501   500
+  502   500
+  600   600
+"""
+
+
+def test_group_size_counts_only_that_group() -> None:
+    assert ci_run.group_size(500, PS_OUTPUT) == 3
+    assert ci_run.group_size(600, PS_OUTPUT) == 1
+    assert ci_run.group_size(700, PS_OUTPUT) == 0
+    assert ci_run.group_size(500, "garbage\n  x  y\n") == 0
+
+
+@pytest.mark.skipif(os.name == "nt", reason="process groups and ps are POSIX")
+def test_the_group_is_counted_and_reported(tmp_path: Path) -> None:
+    output = tmp_path / "out.log"
+    script = "import subprocess, sys, time; subprocess.Popen(['sleep', '5']); time.sleep(1.5)"
+
+    code = ci_run.run([sys.executable, "-c", script], output, 30, echo=io.StringIO(), poll_s=0.3)
+
+    assert code == 0
+    counts = [
+        int(n) for n in re.findall(r"ci_run: (\d+) processes in the group", output.read_text())
+    ]
+    assert counts and max(counts) >= 2
+
+
+@pytest.mark.skipif(os.name == "nt", reason="process groups and ps are POSIX")
+def test_too_many_processes_kill_the_group(tmp_path: Path) -> None:
+    """A run that multiplies (a child pytest starting the suite again) is
+    stopped at the cap, not when the machine stops answering."""
+    output = tmp_path / "out.log"
+    script = (
+        "import subprocess, time\n"
+        "for _ in range(30):\n"
+        "    subprocess.Popen(['sleep', '60'])\n"
+        "    time.sleep(0.05)\n"
+        "time.sleep(60)\n"
+    )
+    started = time.monotonic()
+
+    code = ci_run.run(
+        [sys.executable, "-c", script],
+        output,
+        60,
+        echo=io.StringIO(),
+        poll_s=0.2,
+        max_processes=10,
+    )
+
+    assert code == ci_run.TOO_MANY
+    assert time.monotonic() - started < 20
+    assert "ci_run: more than 10 processes in the group; killed it" in output.read_text()
+
+
+def test_counting_never_fails_the_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    def broken(*args: Any, **kwargs: Any) -> None:
+        raise OSError("no ps")
+
+    monkeypatch.setattr(subprocess, "run", broken)
+    assert ci_run.count_group(1, windows=False) is None
+    assert ci_run.count_group(1, windows=True) is None

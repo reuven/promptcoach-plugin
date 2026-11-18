@@ -24,6 +24,7 @@ from conftest import (
     child_env,
     posix_only,
     prompt_payload,
+    run_child_pytest,
     run_hook,
     stop_payload,
 )
@@ -310,108 +311,92 @@ def test_passes_but_leaves_a_thread_behind():
 """
 
 
-def _run_backstopped(tmp_path: Path, name: str, source: str) -> tuple[int, float, str]:
-    """Run one test file in a child pytest with the conftest and a 2 s hard
-    limit: (its exit status, its wall time, the hang log)."""
-    (tmp_path / name).write_text(source)
-    log = tmp_path / "hang.log"
-    tests = Path(__file__).resolve().parent
-    env = child_env(
-        {
-            "PYTHONPATH": os.pathsep.join(
-                [str(tests), str(tests.parent / "plugins/promptcoach/hooks")]
-            ),
-            "PROMPTCOACH_TEST_HARD_LIMIT_S": "2",
-            "PROMPTCOACH_HANG_LOG": str(log),
-        }
-    )
-    started = time.monotonic()
-    done = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "-p",
-            "conftest",
-            "-p",
-            "no:cacheprovider",
-            "-o",
-            "addopts=",
-            "-q",
-            str(tmp_path / name),
-        ],
-        cwd=tmp_path,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
-    )
-    return done.returncode, time.monotonic() - started, log.read_text()
-
-
 def test_a_hang_after_the_last_test_dumps_every_stack_and_ends_the_run(tmp_path: Path) -> None:
     """The watchdog stays armed from start to exit, not just inside tests."""
-    code, seconds, text = _run_backstopped(tmp_path, "test_exit.py", STUCK_AT_EXIT)
+    child = run_child_pytest(tmp_path, "test_exit.py", STUCK_AT_EXIT)
 
-    assert code != 0
-    assert seconds < 30
-    assert "after test_exit.py::test_passes_but_leaves_a_thread_behind" in text
-    assert "exiting" in text
-    assert "Timeout" in text and "wait" in text.rsplit("exiting", 1)[-1]
+    assert child.code != 0
+    assert child.seconds < 30
+    assert "after test_exit.py::test_passes_but_leaves_a_thread_behind" in child.hang_log
+    assert "exiting" in child.hang_log
+    assert "Timeout" in child.hang_log and "wait" in child.hang_log.rsplit("exiting", 1)[-1]
 
 
 def test_a_run_without_a_hang_exits_cleanly(tmp_path: Path) -> None:
-    code, _, text = _run_backstopped(tmp_path, "test_fine.py", "def test_fine():\n    pass\n")
+    child = run_child_pytest(tmp_path, "test_fine.py", "def test_fine():\n    pass\n")
 
-    assert code == 0
-    assert "running test_fine.py::test_fine" in text and "Timeout" not in text
+    assert child.code == 0
+    assert "running test_fine.py::test_fine" in child.hang_log
+    assert "Timeout" not in child.hang_log
 
 
 def test_a_hung_test_dumps_its_stack_and_ends_the_run(tmp_path: Path) -> None:
     """The per-test timer can't interrupt a blocking call on Windows; the
     faulthandler backstop can: past the hard limit it writes every thread's
     stack to the hang log and exits non-zero, long before CI's job timeout."""
-    (tmp_path / "test_stuck.py").write_text(STUCK_TEST)
-    log = tmp_path / "hang.log"
-    tests = Path(__file__).resolve().parent
-    env = child_env(
-        {
-            "PYTHONPATH": os.pathsep.join(
-                [str(tests), str(tests.parent / "plugins/promptcoach/hooks")]
-            ),
-            "PROMPTCOACH_TEST_HARD_LIMIT_S": "2",
-            "PROMPTCOACH_HANG_LOG": str(log),
-        }
-    )
-    started = time.monotonic()
-    done = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "-p",
-            "conftest",
-            "-p",
-            "no:cacheprovider",
-            "-o",
-            "addopts=",
-            "-q",
-            str(tmp_path / "test_stuck.py"),
-        ],
-        cwd=tmp_path,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
-    )
+    child = run_child_pytest(tmp_path, "test_stuck.py", STUCK_TEST)
 
-    assert done.returncode != 0
-    assert time.monotonic() - started < 30
-    text = log.read_text()
-    assert "running test_stuck.py::test_stuck_in_a_blocking_call" in text
-    assert "Timeout" in text and "test_stuck_in_a_blocking_call" in text.split("running", 2)[-1]
+    assert child.code != 0
+    assert child.seconds < 30
+    assert "running test_stuck.py::test_stuck_in_a_blocking_call" in child.hang_log
+    after = child.hang_log.split("running", 2)[-1]
+    assert "Timeout" in child.hang_log and "test_stuck_in_a_blocking_call" in after
+
+
+# --- a child pytest is hermetic, and can't start another ------------------------------
+
+# What the child sees: its depth, its config, and how many tests it collected.
+INTROSPECT = """
+import os, sys
+
+def test_where_am_i(request):
+    config = request.config
+    print("DEPTH", os.environ.get("PROMPTCOACH_CHILD_DEPTH"))
+    print("INI", config.inipath)
+    print("ROOT", config.rootpath)
+    print("ADDOPTS", config.getini("addopts"))
+    print("ENV", sorted(k for k in ("CI", "COVERAGE_FILE", "PYTEST_ADDOPTS", "COV_CORE_SOURCE")
+                        if k in os.environ))
+    print("ITEMS", len(request.session.items))
+"""
+
+
+def test_a_child_pytest_runs_only_its_own_file_with_its_own_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Whatever CI's environment holds (CI, PYTEST_ADDOPTS, COVERAGE_FILE),
+    the child runs one file, with an empty config rooted in its own temp dir:
+    never the repo's addopts or testpaths, so never the whole suite again."""
+    for key, value in {"CI": "true", "PYTEST_ADDOPTS": "tests", "COVERAGE_FILE": "x"}.items():
+        monkeypatch.setenv(key, value)
+    child = run_child_pytest(tmp_path, "test_where.py", INTROSPECT, extra_args=["-s"])
+
+    assert child.code == 0, child.output
+    lines = dict(
+        line.split(" ", 1)
+        for line in child.output.splitlines()
+        if line[:3].isupper()
+        and " " in line
+        and line.split(" ", 1)[0] in {"DEPTH", "INI", "ROOT", "ADDOPTS", "ENV", "ITEMS"}
+    )
+    assert lines["DEPTH"] == "1"
+    assert Path(lines["INI"]) == tmp_path / "pytest.ini"
+    assert Path(lines["ROOT"]) == tmp_path
+    assert lines["ADDOPTS"] == "[]"
+    assert lines["ENV"] == "[]"
+    assert lines["ITEMS"] == "1"
+
+
+def test_a_child_pytest_never_starts_another(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Inside a child (PROMPTCOACH_CHILD_DEPTH set), starting another fails
+    loudly instead of multiplying runs."""
+    monkeypatch.setenv("PROMPTCOACH_CHILD_DEPTH", "1")
+
+    with pytest.raises(RuntimeError, match="already inside a child pytest"):
+        run_child_pytest(tmp_path, "test_x.py", "def test_x():\n    pass\n")
+    assert not (tmp_path / "test_x.py").exists()
 
 
 def test_the_hard_limit_leaves_the_per_test_timer_to_act_first() -> None:

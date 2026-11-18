@@ -156,7 +156,7 @@ def test_ci_gates_coverage_on_the_union_of_every_cell() -> None:
     # Every cell runs one pytest command, the same everywhere, keeping its data
     # under its own name and uploading it even when a test failed.
     assert "COVERAGE_FILE: .coverage.${{ matrix.os }}-${{ matrix.python }}" in check
-    [pytest_step] = re.findall(r"- run: (.*uv run pytest.*)", check)
+    [pytest_step] = re.findall(r"(uv run python tools/ci_run\.py .*-- uv run pytest -v.*)", check)
     assert pytest_step.endswith(" -- uv run pytest -v --cov-fail-under=0")
     assert "runner.os" not in check and "matrix.os ==" not in check
     assert "continue-on-error" not in check
@@ -210,11 +210,13 @@ def test_ci_names_a_hung_test() -> None:
     the hang log are printed and uploaded after it, whatever happened. The
     step's and the job's own limits sit above the runner's deadline."""
     check = _ci_jobs()["check"]
-    step = re.search(
-        r"- run: (uv run python tools/ci_run\.py .*?)\n(.*?)(?=\n      - )", check, re.S
-    )
+    step = re.search(r"- name: Tests\n\s+shell: bash\n\s+run: \|\n(.*?)(?=\n      - )", check, re.S)
     assert step is not None
-    command, rest = step.group(1), step.group(2)
+    body = step.group(1)
+    # A process limit on POSIX (Git Bash on Windows has none), then the runner.
+    assert "ulimit -S -u 3000" in body
+    [command] = re.findall(r"(uv run python tools/ci_run\.py .*-- uv run pytest -v .*)", body)
+    rest = body
     out = "${{ runner.temp }}/pytest-output.log"
     assert f'--output "{out}"' in command
     deadline = int(re.search(r"--deadline (\d+)", command).group(1))  # type: ignore[union-attr]
@@ -255,3 +257,14 @@ def test_ci_run_is_stdlib_only() -> None:
     stdlib = {"__future__", "argparse", "contextlib", "os", "pathlib", "signal"}
     stdlib |= {"subprocess", "sys", "threading", "time", "typing"}
     assert imported <= stdlib
+
+
+def test_ci_prints_what_each_cell_collects() -> None:
+    """Before the tests, each cell lists how many it collected (through the
+    runner, with its own deadline), so a 3.9-only difference shows up."""
+    check = _ci_jobs()["check"]
+    collect = re.search(r"- name: Collect\n(.*?)(?=\n      - )", check, re.S)
+    assert collect is not None
+    assert "tools/ci_run.py" in collect.group(1)
+    assert "-- uv run pytest --collect-only -q --no-cov" in collect.group(1)
+    assert check.index("- name: Collect") < check.index("- name: Tests")
