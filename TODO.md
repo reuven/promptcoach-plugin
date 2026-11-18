@@ -14,6 +14,27 @@
 - [x] Hypothesis (dev only): a never-crash property for `before()` and a
       no-echo property for the command block; dev/ci/mutmut profiles.
 
+### Windows
+
+- [x] One shell-form hook command for every OS (docs/windows.md); a Windows
+      path in `gitdiff`; UTF-8 stdio; CI on ubuntu, windows and macos.
+- [ ] Check by hand on a real Windows machine, with and without Git Bash:
+      the assumptions listed in docs/windows.md.
+- [ ] Read the first windows-latest CI run job by job: it is the first time
+      the suite runs on Windows (CRLF checkouts, symlink privileges, git's
+      behavior there).
+- [ ] A Job Object (kill on close) so git can't outlive a killed hook.
+- [ ] Junctions inside `.git` (`DirEntry.is_junction`, 3.12+, or the
+      reparse-point attribute before that): the walk treats them as
+      directories today.
+- [ ] Windows paths in commands (`C:\...\printenv.exe`): `prints_secrets`
+      and the skeleton take a program's name after the last `/` only.
+- [ ] Python from the Microsoft Store is never used (it lives under
+      `WindowsApps`, like the stub).
+- [ ] Set the version to `1.0.0b1` once the server accepts it: today both the
+      server's `Version` pattern and the client's `VERSION_PATTERN` allow
+      only `x.y.z`, so a `1.0.0b1` body would get a 422 and no coaching.
+
 ### Redaction (`redact`)
 
 - [ ] Multi-line `<password>` elements (`<password>\n  value\n</password>`).

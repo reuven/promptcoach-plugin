@@ -23,9 +23,13 @@ and Claude never acts on it by itself.
 4. Turn on auto-update: `/plugin` → Marketplaces → promptcoach → enable
    auto-update. Third-party marketplaces don't update on their own.
 
-The hooks need `python3` 3.9 or newer on your `PATH` (the one macOS ships
-is fine); if yours is older, the coach says so once per session and
-otherwise stays out of the way. Nothing else is installed: the hook code uses
+The hooks need Python 3.9 or newer: `python3` on macOS and Linux (the one
+macOS ships is fine), and on Windows the `py` launcher or a `python3` or
+`python` from python.org or uv (the Microsoft Store's `python3` alias isn't
+used: see [docs/windows.md](docs/windows.md), which also lists what is
+still to be checked by hand on Windows). If yours is older, the coach says
+so once per session and otherwise stays out of the way; with no Python at
+all, the hooks do nothing. Nothing else is installed: the hook code uses
 only Python's standard library, and runs as `python3 -I`, so modules in your
 project (or on your `PYTHONPATH`) are never loaded into it.
 
@@ -170,6 +174,13 @@ clean up: a git it started then runs to its end, which takes about as long
 as `git add -A` on your project (or until something stops it: it still obeys
 SIGTERM); it writes only the plugin's own private index file and
 unreferenced objects in `.git/objects`.
+
+## Versions
+
+The plugin's version is the coach server's version: they are released
+together, and every request names it (`X-Promptcoach-Plugin`). One test
+keeps `plugin.json`, `pyproject.toml` and the package's `__version__` the
+same.
 
 ## License
 
