@@ -522,9 +522,10 @@ def before(
     deadline = gitdiff.Deadline(BEFORE_BUDGET_S, started)
     store = Store(config.data_dir)
     store.sweep(time.time())
-    if not _valid_ids(event.session_id, event.prompt_id):
-        return None
     command = profile.capabilities.can_block_prompt and is_coach_command(event.prompt)
+    if not _valid_ids(event.session_id, event.prompt_id):
+        # The server would refuse these ids: a command can't be applied.
+        return Reply(COMMAND_NOT_ANSWERED, True, True) if command else None
     if not config.token:
         if command:
             return Reply(profile.command_without_token_message, True, True)

@@ -9,6 +9,7 @@ person, not to Claude) or, before a prompt, ``decision: block``.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 from collections.abc import Mapping
@@ -168,27 +169,38 @@ def main(
     """Run one hook: ``before``, ``record`` or ``after``. Always returns 0.
 
     Nothing here may break the person's session, so any failure, ours or
-    the server's, ends silently.
+    the server's, ends silently, except for a coach command: it is spotted
+    first, from the raw prompt, and if anything after that fails it is
+    blocked (``COMMAND_NOT_ANSWERED``) rather than handed to Claude.
     """
+    command = False
+    written: list[bool] = []
     try:
         mode = argv[0] if argv else ""
-        payload = json.loads(stdin.read(MAX_STDIN_CHARS))
+        payload = json.loads(stdin.read(MAX_STDIN_CHARS).lstrip("\ufeff"))
         if not isinstance(payload, dict):
             return 0
+        prompt = payload.get("prompt")
+        command = (
+            mode == "before"
+            and PROFILE.capabilities.can_block_prompt
+            and isinstance(prompt, str)
+            and core.is_coach_command(prompt)
+        )
         config = config_from_env(env)
         gitdiff.install_cleanup()
         if mode == "before":
-            emit(
-                core.before(prompt_submitted(payload, env), config, PROFILE, started),
-                stdout,
-                allow_block=True,
-            )
+            reply = core.before(prompt_submitted(payload, env), config, PROFILE, started)
+            written.append(True)
+            emit(reply, stdout, allow_block=True)
         elif mode == "record":
             run = tool_ran(payload)
             if run is not None:
                 core.record(run, config)
         elif mode == "after":
             emit(core.after(turn_ended(payload, env), config, PROFILE), stdout, allow_block=False)
-    except Exception:  # noqa: BLE001, S110 - a coach must never break the session
-        pass
+    except Exception:  # noqa: BLE001 - a coach must never break the session
+        if command and not written:
+            with contextlib.suppress(Exception):
+                emit(core.Reply(core.COMMAND_NOT_ANSWERED, True, True), stdout, allow_block=True)
     return 0

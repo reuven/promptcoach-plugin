@@ -45,8 +45,9 @@ def _warn_old_python(
     return 0
 
 
-def utf8(stream: TextIO) -> None:
-    """Make ``stream`` read or write UTF-8, whatever the locale.
+def utf8(stream: TextIO, encoding: str = "utf-8") -> None:
+    """Make ``stream`` read or write UTF-8 (``utf-8-sig`` for stdin, which
+    drops a byte order mark), whatever the locale.
 
     Why: Claude Code sends and reads UTF-8, but Python 3.9 to 3.14 use the
     locale's code page for stdio on Windows (often cp1252). Call it before
@@ -54,7 +55,7 @@ def utf8(stream: TextIO) -> None:
     """
     reconfigure = getattr(stream, "reconfigure", None)
     if reconfigure is not None:
-        reconfigure(encoding="utf-8", errors="replace")
+        reconfigure(encoding=encoding, errors="replace")
 
 
 def run(argv: "list[str]", stdin: TextIO, stdout: TextIO, env: "Mapping[str, str]") -> int:
@@ -64,12 +65,14 @@ def run(argv: "list[str]", stdin: TextIO, stdout: TextIO, env: "Mapping[str, str
     here = os.path.dirname(os.path.abspath(__file__))
     if here not in sys.path:
         sys.path.insert(0, here)
-    from promptcoach_client.claude_code import main
-
+    try:
+        from promptcoach_client.claude_code import main
+    except Exception:  # noqa: BLE001 - a half-updated install: silence, never exit 1
+        return 0
     return main(argv, stdin, stdout, env, STARTED)
 
 
 if __name__ == "__main__":
-    utf8(sys.stdin)
+    utf8(sys.stdin, "utf-8-sig")
     utf8(sys.stdout)
     sys.exit(run(sys.argv[1:], sys.stdin, sys.stdout, os.environ))

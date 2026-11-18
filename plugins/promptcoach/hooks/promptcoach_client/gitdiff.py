@@ -137,14 +137,117 @@ _PENDING_TERM: set[int] = set()
 _STARTING = threading.RLock()
 
 
+class _WinJobs:  # pragma: no cover - Windows only; test_real_job_object_kills_a_process_tree
+    """Windows Job Objects through ctypes: a job set to kill every process in
+    it when its last handle closes, so git, and any git that a wrapper
+    ``git.exe`` started, ends with the job (or with the hook, if the hook is
+    killed outright and Windows closes its handles). Every call fails soft:
+    ``create`` returns None and the caller falls back to ``taskkill``.
+    """
+
+    def _kernel32(self) -> Any:
+        import ctypes
+
+        return ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+
+    def create(self) -> int | None:
+        import ctypes
+        from ctypes import wintypes
+
+        class Basic(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_int64),
+                ("PerJobUserTimeLimit", ctypes.c_int64),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class Extended(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", Basic),
+                ("IoInfo", ctypes.c_uint64 * 6),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        try:
+            k32 = self._kernel32()
+            k32.CreateJobObjectW.restype = wintypes.HANDLE
+            job = k32.CreateJobObjectW(None, None)
+            if not job:
+                return None
+            info = Extended()
+            info.BasicLimitInformation.LimitFlags = 0x2000  # KILL_ON_JOB_CLOSE
+            # 9: JobObjectExtendedLimitInformation
+            if not k32.SetInformationJobObject(
+                wintypes.HANDLE(job), 9, ctypes.byref(info), ctypes.sizeof(info)
+            ):
+                k32.CloseHandle(wintypes.HANDLE(job))
+                return None
+            return int(job)
+        except Exception:  # noqa: BLE001 - no ctypes, no kernel32: fall back
+            return None
+
+    def assign(self, job: int, proc: subprocess.Popen[bytes]) -> bool:
+        from ctypes import wintypes
+
+        try:
+            handle = wintypes.HANDLE(int(proc._handle))  # type: ignore[attr-defined]
+            return bool(self._kernel32().AssignProcessToJobObject(wintypes.HANDLE(job), handle))
+        except Exception:  # noqa: BLE001
+            return False
+
+    def terminate(self, job: int) -> None:
+        from ctypes import wintypes
+
+        with contextlib.suppress(Exception):
+            self._kernel32().TerminateJobObject(wintypes.HANDLE(job), 1)
+
+    def close(self, job: int) -> None:
+        from ctypes import wintypes
+
+        with contextlib.suppress(Exception):
+            self._kernel32().CloseHandle(wintypes.HANDLE(job))
+
+
+_JOBS: Any = _WinJobs()  # tests put a fake here
+_JOB_OF: dict[int, int] = {}  # git's pid -> its job, on Windows
+
+
+def _run_taskkill(argv: list[str], timeout: float) -> None:
+    """``taskkill /T /F``: the fallback when no job could be made. Never raises."""
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        subprocess.run(  # noqa: S603 - a fixed system tool and a pid
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout,
+            check=False,
+        )
+
+
 def _kill_pid(pid: int) -> None:
-    """Kill a git: its whole process group on POSIX, the process on Windows
-    (where ``os.kill`` with SIGTERM is TerminateProcess)."""
+    """Kill a git and what it started: its process group on POSIX; on
+    Windows its job, else ``taskkill /T`` and TerminateProcess."""
+    if WINDOWS:
+        job = _JOB_OF.get(pid)
+        if job is not None:
+            _JOBS.terminate(job)
+            return
+        _run_taskkill(["taskkill", "/T", "/F", "/PID", str(pid)], 1.0)
+        with contextlib.suppress(OSError):
+            os.kill(pid, signal.SIGTERM)  # TerminateProcess
+        return
     with contextlib.suppress(OSError):
-        if WINDOWS:
-            os.kill(pid, signal.SIGTERM)
-        else:
-            os.killpg(pid, signal.SIGKILL)
+        os.killpg(pid, signal.SIGKILL)
 
 
 def _kill_live() -> None:
@@ -154,6 +257,7 @@ def _kill_live() -> None:
         _LIVE.discard(pgid)
 
 
+_READER_GRACE_S = 0.2  # after a kill, how long to wait for git's output to close
 _EXIT_WAIT_S = 0.3  # how long the exit cleanup waits for a git that is starting
 
 
@@ -270,6 +374,8 @@ def run_git(
                 **_start_options(windows),
             )
             _LIVE.add(proc.pid)
+            if windows:
+                _add_job(proc)
     except OSError:  # git missing, cwd gone
         return None
     finally:
@@ -281,7 +387,15 @@ def run_git(
     chunks: list[bytes] = []
     stdout = proc.stdout
     assert stdout is not None  # noqa: S101 - PIPE always sets it
-    reader = threading.Thread(target=lambda: chunks.append(stdout.read(limit + 1)), daemon=True)
+
+    def read() -> None:
+        try:
+            with contextlib.suppress(Exception):  # a thread's error would print to stderr
+                chunks.append(stdout.read(limit + 1))
+        finally:
+            stdout.close()  # here too: a read still blocked at the end is closed when it ends
+
+    reader = threading.Thread(target=read, daemon=True)
     deadline = time.monotonic() + timeout
     reader.start()
     reader.join(timeout)
@@ -289,25 +403,40 @@ def run_git(
     try:
         if reader.is_alive() or truncated:
             _kill(proc)
-            reader.join(1.0)  # the pipe closes with the group, so this returns at once
+            # The pipe closes with git's group (POSIX) or job; if something
+            # still holds it (a wrapper's child on Windows), stop waiting.
+            reader.join(_READER_GRACE_S)
         code = proc.wait(max(deadline - time.monotonic(), 0.1))
     except subprocess.TimeoutExpired:  # git closed its output but kept running
         _kill(proc)
         proc.wait()
         return None
     finally:
-        stdout.close()
+        if not reader.is_alive():  # closing under a blocked read would wait for it
+            stdout.close()
         _LIVE.discard(proc.pid)
+        job = _JOB_OF.pop(proc.pid, None)
+        if job is not None:
+            _JOBS.close(job)  # kills whatever is left in it
     if not chunks or (code != 0 and not truncated):
         return None
     return GitOutput(chunks[0][:limit].decode("utf-8", errors="replace"), truncated)
 
 
+def _add_job(proc: subprocess.Popen[bytes]) -> None:
+    """Put a just-started git in a kill-on-close job (Windows)."""
+    job = _JOBS.create()
+    if job is None:
+        return
+    if _JOBS.assign(job, proc):
+        _JOB_OF[proc.pid] = job
+    else:
+        _JOBS.close(job)
+
+
 def _kill(proc: subprocess.Popen[bytes]) -> None:
-    """Kill git and everything it started (its process group; on Windows,
-    git alone)."""
-    if not WINDOWS:
-        _kill_pid(proc.pid)
+    """Kill git and everything it started (its process group, or its job)."""
+    _kill_pid(proc.pid)
     proc.kill()
 
 
@@ -374,19 +503,26 @@ def _read_control(path: Path) -> tuple[bool, str]:
     block on a read.
     """
     nofollow, nonblock = getattr(os, "O_NOFOLLOW", None), getattr(os, "O_NONBLOCK", None)
+    checked = None
     try:
         # Windows has no such flags (and no FIFOs): refuse a symlink, or
-        # anything else not a regular file, before opening it.
-        posix_flags = nofollow is not None and nonblock is not None
-        if not posix_flags and not stat.S_ISREG(os.lstat(path).st_mode):
-            return False, ""
-        fd = os.open(path, os.O_RDONLY | (nofollow or 0) | (nonblock or 0))
+        # anything else not a regular file, before opening it, and then
+        # make sure the file opened is the one checked.
+        if nofollow is None or nonblock is None:
+            checked = os.lstat(path)
+            if not stat.S_ISREG(checked.st_mode):
+                return False, ""
+        flags = os.O_RDONLY | (nofollow or 0) | (nonblock or 0) | getattr(os, "O_BINARY", 0)
+        fd = os.open(path, flags)
     except FileNotFoundError:
         return True, ""
     except OSError:
         return False, ""
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
+            return False, ""
+        if checked is not None and not os.path.samestat(checked, opened):
             return False, ""
         data = os.read(fd, _CONTROL_BYTES + 1)
     finally:
