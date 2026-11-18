@@ -186,6 +186,16 @@ together, and every request names it (`X-Promptcoach-Plugin`). One test
 keeps `plugin.json`, `pyproject.toml` and the package's `__version__` the
 same.
 
+Versions are a strict subset of PEP 440, the server's own pattern: two to
+four release numbers, an optional `a`, `b` or `rc` pre-release and an
+optional `.devN` (so `1.0.0b1` is a version), at most 32 characters. The
+plugin only checks the pattern; the server orders versions, by PEP 440.
+
+**Release order: deploy the server first, then publish the plugin.** A
+plugin whose version the running server doesn't accept yet (a new pattern,
+a newer version than its minimum allows) gets a 422 on every request, so
+no coaching, until the server catches up.
+
 ## License
 
 MIT; see [LICENSE](LICENSE).

@@ -34,9 +34,8 @@
       and the skeleton take a program's name after the last `/` only.
 - [ ] Python from the Microsoft Store is never used (it lives under
       `WindowsApps`, like the stub).
-- [ ] Set the version to `1.0.0b1` once the server accepts it: today both the
-      server's `Version` pattern and the client's `VERSION_PATTERN` allow
-      only `x.y.z`, so a `1.0.0b1` body would get a 422 and no coaching.
+- [x] Set the version to `1.0.0b1`: the client takes the server's PEP 440
+      subset (feat/ci-fix). Deploy that server before publishing the plugin.
 
 ### Redaction (`redact`)
 

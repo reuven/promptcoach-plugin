@@ -93,7 +93,15 @@ MAX_SKILLS = 50
 MAX_SKILL_CHARS = 80
 MAX_TEST_COMMAND_CHARS = 200
 ID_PATTERN = r"[A-Za-z0-9_.:-]{1,128}"
-VERSION_PATTERN = r"[0-9]+\.[0-9]+\.[0-9]+"
+# The server's version (versions.py): a strict PEP 440 subset, so 1.0.0b1
+# passes. Release parts 1-4 digits each, two to four of them; each N 1-4
+# digits; [0-9], not \d, which matches any Unicode digit. At most 32 characters.
+VERSION_PATTERN = (
+    r"[0-9]{1,4}(?:\.[0-9]{1,4}){1,3}"
+    r"(?:(?:a|b|rc)[0-9]{1,4})?"
+    r"(?:\.dev[0-9]{1,4})?"
+)
+MAX_VERSION_CHARS = 32
 
 MAX_PROMPT_CHARS = 100_000
 MAX_DIFF_CHARS = 300_000

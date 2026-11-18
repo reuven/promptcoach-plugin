@@ -53,6 +53,7 @@ from .contract import (
     MAX_PROMPT_CHARS,
     MAX_REPLY_CHARS,
     MAX_TOOL_RUNS,
+    MAX_VERSION_CHARS,
     PROJECT_INSTRUCTION_FILES,
     VERSION_PATTERN,
 )
@@ -75,6 +76,17 @@ LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1"})
 IS_TEST = re.compile(r"\b(pytest|unittest|tox|nox|make test|uv run pytest)\b")
 _ID = re.compile(ID_PATTERN)
 _VERSION = re.compile(VERSION_PATTERN)
+
+
+def valid_version(text: str) -> bool:
+    """True if the server would take ``text`` as a version (body and header).
+
+    Matching only: the client never orders versions (the server does, by
+    PEP 440).
+    """
+    return len(text) <= MAX_VERSION_CHARS and _VERSION.fullmatch(text) is not None
+
+
 _FILE_SAFE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 _TEMP_PREFIXES = ("snap-", "idx-", "runs-")
 _COMMAND = re.compile(COMMAND_PATTERN, re.IGNORECASE | re.ASCII)
@@ -117,7 +129,7 @@ class AgentProfile:
     def __post_init__(self) -> None:
         """Refuse a profile the server would refuse (a 422 is silence)."""
         sources = self.sources
-        if self.agent not in AGENTS or not _VERSION.fullmatch(self.plugin_version):
+        if self.agent not in AGENTS or not valid_version(self.plugin_version):
             raise ValueError("unknown agent or bad version")
         if not set(sources.project_instruction_files) <= set(PROJECT_INSTRUCTION_FILES):
             raise ValueError("unknown project instruction file")
