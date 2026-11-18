@@ -426,3 +426,74 @@ def test_git_does_not_inherit_a_blocked_sigterm(
     assert gone
     assert time.monotonic() - started < 5
     assert results == [None]
+
+
+# --- Merge review: the exit cleanup can't hang on a stalled start ---------------------------
+
+STALLED_START = """
+real = subprocess.Popen
+class StalledPopen(real):
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        time.sleep(10)  # stalled inside the start lock, git not yet tracked
+gitdiff.subprocess.Popen = StalledPopen
+threading.Thread(
+    target=gitdiff.run_git, args=(["status"], pathlib.Path(sys.argv[2])),
+    kwargs={"timeout": 30}, daemon=True,
+).start()
+while not pid_file.exists() or not pid_file.read_text().strip():
+    time.sleep(0.02)
+print(time.time(), flush=True)
+"""
+
+
+def test_exit_does_not_wait_long_for_a_stalled_start(tmp_path: Path) -> None:
+    """Main finishes; the process is gone within about half a second."""
+    fake, pid_file = _fake_git(tmp_path)
+    child = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            CHILD_HEAD + STALLED_START,
+            str(HOOK.parent),
+            str(tmp_path),
+            str(pid_file),
+        ],
+        env={"PATH": f"{fake}{os.pathsep}{os.environ['PATH']}"},
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    finished = time.time()
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(_wait_for_pid(pid_file), signal.SIGKILL)
+    assert child.returncode == 0
+    assert finished - float(child.stdout.split()[-1]) < 0.8
+
+
+def test_exit_cleanup_kills_what_it_can_when_the_lock_is_held(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    killed: list[int] = []
+    monkeypatch.setattr(gitdiff, "_LIVE", {2**22 + 9})
+    monkeypatch.setattr(os, "killpg", lambda pgid, signum: killed.append(pgid))
+    held, release = threading.Event(), threading.Event()
+
+    def hold() -> None:
+        with gitdiff._STARTING:
+            held.set()
+            release.wait(10)
+
+    holder = threading.Thread(target=hold, daemon=True)
+    holder.start()
+    held.wait(5)
+    started = time.monotonic()
+    try:
+        gitdiff._exit_cleanup()
+    finally:
+        release.set()
+        holder.join(5)
+    assert time.monotonic() - started < 1.0
+    assert killed == [2**22 + 9]
