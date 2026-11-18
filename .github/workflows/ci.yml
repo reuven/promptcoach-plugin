@@ -45,16 +45,15 @@ jobs:
       # tools/ci_run.py SIGKILLs pytest's whole process group (taskkill /T
       # on Windows) at its deadline, which nothing in the run can ignore, and
       # keeps the output in a file. The step's limit is a last resort above it.
-      # What this cell collects, before running anything: a difference
-      # between the 3.9 and 3.14 cells shows here.
-      - name: Collect
-        timeout-minutes: 3
-        run: uv run python tools/ci_run.py --output "${{ runner.temp }}/pytest-collect.log" --deadline 120 -- uv run pytest --collect-only -q --no-cov
+      # -v prints every test id, and GitHub's log handling chokes on a long
+      # line (two 1 MB ids once held every 3.9 cell for 24 minutes, pytest
+      # blocked on the full pipe); test_every_test_id_is_short keeps them short.
       # A soft process limit (POSIX; Git Bash on Windows has none). No
       # virtual-memory limit: pwsh (.NET) reserves far more than it uses and
       # aborts under one. The runner stops the run past 500 processes or 3 GB
       # resident in its group, and logs both.
-      # --durations=25 lists the slowest tests.
+      # --durations=25 lists the slowest tests: the timing-budget tests'
+      # margins, per OS.
       - name: Tests
         shell: bash
         run: |

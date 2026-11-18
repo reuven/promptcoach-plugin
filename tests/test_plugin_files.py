@@ -267,17 +267,6 @@ def test_ci_run_is_stdlib_only() -> None:
     assert imported <= stdlib
 
 
-def test_ci_prints_what_each_cell_collects() -> None:
-    """Before the tests, each cell lists how many it collected (through the
-    runner, with its own deadline), so a 3.9-only difference shows up."""
-    check = _ci_jobs()["check"]
-    collect = re.search(r"- name: Collect\n(.*?)(?=\n      - )", check, re.S)
-    assert collect is not None
-    assert "tools/ci_run.py" in collect.group(1)
-    assert "-- uv run pytest --collect-only -q --no-cov" in collect.group(1)
-    assert check.index("- name: Collect") < check.index("- name: Tests")
-
-
 def test_ci_lists_survivors_after_the_tests() -> None:
     check = _ci_jobs()["check"]
     step = re.search(r"- name: Processes still running\n(.*?)(?=\n      - )", check, re.S)
@@ -285,25 +274,6 @@ def test_ci_lists_survivors_after_the_tests() -> None:
     assert "if: ${{ always() }}" in step.group(1)
     assert "tasklist" in step.group(1) and "ps -ef" in step.group(1)
     assert check.index("- name: Tests") < check.index("- name: Processes still running")
-
-
-def test_the_diagnostic_workflow_runs_only_on_diag_branches() -> None:
-    """diag.yml is a throwaway for finding where 3.9 hangs: it must never run
-    on main, on tags or on pull requests, and nothing in it may fail a run."""
-    diag = (ROOT / ".github" / "workflows" / "diag.yml").read_text()
-    trigger = diag.split("\non:\n", 1)[1].split("\n\n", 1)[0]
-    assert [line.strip() for line in trigger.strip().splitlines()] == [
-        "push:",
-        "branches: [diag/**]",
-    ]
-    for forbidden in ("main", "tags", "pull_request", "workflow_dispatch", "schedule"):
-        assert forbidden not in trigger
-    assert "fail-fast: false" in diag
-    steps = re.findall(r"^      - name: .*?(?=^      - |\Z)", diag, re.M | re.S)
-    assert steps
-    for step in steps:
-        assert "continue-on-error: true" in step, step
-        assert "timeout-minutes: 3" in step, step
 
 
 MAX_NODEID_CHARS = 200
