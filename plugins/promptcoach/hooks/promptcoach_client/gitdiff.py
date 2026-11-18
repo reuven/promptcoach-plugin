@@ -140,10 +140,19 @@ def _kill_live() -> None:
         _LIVE.discard(pgid)
 
 
+_EXIT_WAIT_S = 0.3  # how long the exit cleanup waits for a git that is starting
+
+
 def _exit_cleanup() -> None:
-    """At exit: kill the running git, waiting for one that is just starting."""
-    with _STARTING:
+    """At exit: kill the running git, waiting briefly for one that is just
+    starting. A start stalled longer doesn't hold the hook's exit: whatever is
+    tracked by then is killed anyway."""
+    acquired = _STARTING.acquire(timeout=_EXIT_WAIT_S)
+    try:
         _kill_live()
+    finally:
+        if acquired:
+            _STARTING.release()
 
 
 def _on_term(signum: int, frame: object) -> None:

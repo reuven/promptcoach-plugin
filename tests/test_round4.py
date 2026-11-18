@@ -293,31 +293,38 @@ pid_file = pathlib.Path(sys.argv[3])
 # git is running but not yet in _LIVE: Popen's return stretched, as on a loaded machine.
 SLOW_START = """
 real = subprocess.Popen
+started = threading.Event()
 class SlowPopen(real):
     def __init__(self, *a, **k):
         super().__init__(*a, **k)
-        time.sleep(1.0)
+        started.set()
+        time.sleep(STALL)
 gitdiff.subprocess.Popen = SlowPopen
 threading.Thread(
     target=gitdiff.run_git, args=(["status"], pathlib.Path(sys.argv[2])),
     kwargs={"timeout": 30}, daemon=True,
 ).start()
-while not pid_file.exists() or not pid_file.read_text().strip():
-    time.sleep(0.02)
+started.wait(10)
 """
 
 
 def test_sigterm_while_another_thread_starts_git_kills_it(tmp_path: Path) -> None:
     """The handler waits for the starting thread (R10: no lock in the handler)."""
-    script = CHILD_HEAD + SLOW_START + "os.kill(os.getpid(), signal.SIGTERM)\ntime.sleep(30)\n"
+    script = (
+        CHILD_HEAD
+        + "STALL = 1.0\n"
+        + SLOW_START
+        + "os.kill(os.getpid(), signal.SIGTERM)\ntime.sleep(30)\n"
+    )
     code, orphans = _run_child(script, tmp_path)
     assert code == -signal.SIGTERM
     assert orphans == 0
 
 
 def test_exit_while_another_thread_starts_git_kills_it(tmp_path: Path) -> None:
-    """The exit cleanup waits for the starting thread too (p32)."""
-    code, orphans = _run_child(CHILD_HEAD + SLOW_START, tmp_path)
+    """The exit cleanup waits for the starting thread too (p32), for up to
+    0.3 s: here the start takes 0.2 s."""
+    code, orphans = _run_child(CHILD_HEAD + "STALL = 0.2\n" + SLOW_START, tmp_path)
     assert code == 0
     assert orphans == 0
 
