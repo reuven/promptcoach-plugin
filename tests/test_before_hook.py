@@ -18,6 +18,7 @@ from conftest import (
     StubServer,
     prompt_payload,
     run_hook,
+    stop_payload,
 )
 from promptcoach_client import claude_code, core
 from promptcoach_client.claude_code import PROFILE
@@ -575,3 +576,17 @@ def test_no_token_block_needs_an_agent_that_can_block(env: dict[str, str], proje
     reply = core.before(event, claude_code.config_from_env(env), profile)
 
     assert reply == core.Reply(PROFILE.missing_token_message, False, True)
+
+
+def test_every_request_names_the_plugin_version(
+    server: StubServer, env: dict[str, str], project: Path
+) -> None:
+    from promptcoach_client import __version__
+
+    run_hook("before", prompt_payload(project), env)
+    run_hook("after", stop_payload(project), env)
+
+    assert [r.path for r in server.requests] == ["/v1/before", "/v1/after"]
+    for req in server.requests:
+        assert req.headers["X-Promptcoach-Plugin"] == __version__
+        assert [k for k, v in req.headers.items() if __version__ in v] == ["X-Promptcoach-Plugin"]

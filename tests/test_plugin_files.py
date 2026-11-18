@@ -122,3 +122,16 @@ def test_ci_runs_on_every_os_with_both_pythons() -> None:
     assert 'python: ["3.9", "3.14"]' in ci
     uses = re.findall(r"uses: (\S+)", ci)
     assert uses and all(re.fullmatch(r"[\w.-]+/[\w.-]+@[0-9a-f]{40}", u) for u in uses)
+
+
+def test_every_version_string_is_one_value() -> None:
+    """The plugin's version is the server's, released together (README)."""
+    from promptcoach_client import __version__
+
+    plugin = json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text())
+    market = json.loads((ROOT / ".claude-plugin" / "marketplace.json").read_text())
+    pyproject = re.search(r'^version = "([^"]+)"$', (ROOT / "pyproject.toml").read_text(), re.M)
+    assert pyproject is not None
+    versions = {plugin["version"], pyproject.group(1), __version__}
+    versions |= {p["version"] for p in market["plugins"] if "version" in p}
+    assert versions == {__version__}
