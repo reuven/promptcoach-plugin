@@ -150,8 +150,16 @@ Each hook has one time budget for all its work: 2.5 seconds before a prompt
 slow git or a slow server means less coaching for that turn, never a stuck
 session. The server can keep a prompt from Claude only when the prompt is a
 coach command such as `coach, quieter`: the plugin checks that itself, and
-if it and the server disagree about a prompt, the prompt goes to Claude (the
-plugin fails open). If Claude Code stops a hook at its limit, any git the
+if the server asks to keep back a prompt that isn't a command, the prompt
+goes to Claude (the plugin fails open).
+
+A coach command fails the other way, closed. If the coach doesn't answer
+in time (the request times out, can't connect, gets a server error or a
+reply that isn't one), the command is kept from Claude anyway and you see
+"Coach: I didn't answer in time, so that command wasn't applied. Please
+send it again." Nothing changed, so send the command again. An ordinary
+prompt the coach doesn't answer in time just goes to Claude, with no
+coaching that turn. If Claude Code stops a hook at its limit, any git the
 hook started is stopped with it. A hook killed outright (`kill -9`) can't
 clean up: a git it started then runs to its end, which takes about as long
 as `git add -A` on your project (or until something stops it: it still obeys

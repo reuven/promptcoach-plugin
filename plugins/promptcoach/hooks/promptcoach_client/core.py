@@ -19,7 +19,9 @@ Promises kept here, whatever the agent:
 - Secrets filtered first (``redact``): no output from commands that print
   credentials, and common token shapes redacted. The server scrubs again.
 - One deadline per hook: every git call and the request share it.
-- A block is honored only for a coach command ("coach, quieter").
+- A block is honored only for a coach command ("coach, quieter"), and a
+  coach command fails closed: with no answer from the server it is blocked
+  here, never handed to the agent as a prompt.
 - Every string sent is valid UTF-8.
 """
 
@@ -80,6 +82,13 @@ _SURROGATE = re.compile("[\ud800-\udfff]")
 # C0 and C1 controls (and DEL), except newline and tab: no terminal escapes.
 _CONTROL = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 MAX_MESSAGE_BYTES = 4096
+# The block for a coach command the server didn't answer (timed out, refused,
+# 5xx, not a reply). The server applies a command only when it answers, and
+# then always with a block, so the command wasn't applied. Fixed text, in the
+# voice of the server's own ``COMMAND_RETRY``: nothing the person typed.
+COMMAND_NOT_ANSWERED = (
+    "Coach: I didn't answer in time, so that command wasn't applied. Please send it again."
+)
 
 
 @dataclass(frozen=True)
@@ -489,8 +498,11 @@ def before(
     The start-of-turn snapshot is taken alongside the request (unless the
     person chose prompt-only mode); both end by the hook's deadline. A
     prompt the server blocks never reaches the agent, so its snapshot is
-    dropped; the server may block only a coach command. The reply is
-    built before any state is saved, and saving is best effort.
+    dropped; the server may block only a coach command. A coach command
+    the server didn't answer is blocked here (``COMMAND_NOT_ANSWERED``),
+    where the agent can block: it wasn't applied, and as a prompt the agent
+    would act on it. The reply is built before any state is saved, and
+    saving is best effort; a local block saves no server setting.
     """
     deadline = gitdiff.Deadline(BEFORE_BUDGET_S, started)
     store = Store(config.data_dir)
@@ -535,6 +547,8 @@ def before(
         reply = Reply(reply.message, False, reply.prompt_only)
     if reply is not None:
         store.set_server_prompt_only(reply.prompt_only)
+    elif profile.capabilities.can_block_prompt and is_coach_command(event.prompt):
+        reply = Reply(COMMAND_NOT_ANSWERED, True, prompt_only)
     if trees and not (reply is not None and reply.block):
         store.save_snapshot(event.session_id, event.prompt_id, trees[0])
     return reply
