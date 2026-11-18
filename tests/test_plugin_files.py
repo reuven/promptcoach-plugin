@@ -251,4 +251,7 @@ def test_ci_run_is_stdlib_only() -> None:
     imported |= {
         n.module.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module
     }
-    assert imported <= set(sys.stdlib_module_names) | {"__future__"}  # type: ignore[attr-defined]
+    # Named, not sys.stdlib_module_names: that is 3.10+, and CI runs 3.9.
+    stdlib = {"__future__", "argparse", "contextlib", "os", "pathlib", "signal"}
+    stdlib |= {"subprocess", "sys", "threading", "time", "typing"}
+    assert imported <= stdlib
