@@ -47,6 +47,7 @@ GIT_TIMEOUT_S = 3.0
 # ``preexec_fn``: git runs in a new process group and is killed alone. A
 # module value, so tests can take either branch on any OS.
 WINDOWS = os.name == "nt"
+GIT_COMMAND: tuple[str, ...] = ("git",)  # git from PATH, as the agent runs it
 TRUNCATED = "\n[promptcoach: diff truncated]\n"
 _DIFF_BYTES = MAX_DIFF_CHARS * 4  # UTF-8 never needs more for the cap
 _SMALL_BYTES = 1_000_000  # rev-parse, write-tree, ls-files
@@ -260,7 +261,7 @@ def run_git(
         with _STARTING:
             # git from PATH, as the agent runs it; the arguments are ours alone.
             proc = subprocess.Popen(  # noqa: S603
-                ["git", "--no-pager", *_SAFE_CONFIG, *args],  # noqa: S607
+                [*GIT_COMMAND, "--no-pager", *_SAFE_CONFIG, *args],
                 cwd=cwd,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,

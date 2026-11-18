@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from conftest import StubServer, git, prompt_payload, run_hook
+from conftest import StubServer, git, posix_only, prompt_payload, run_hook
 from promptcoach_client import core, gitdiff, setup_scan
 from promptcoach_client.claude_code import PROFILE, config_from_env, emit, main, tool_ran
 from promptcoach_client.setup_scan import SetupSources, collect_setup, tools_in
@@ -499,6 +499,7 @@ def test_skills_are_capped_and_deduplicated(project: Path, home: Path) -> None:
     assert isinstance(skills, list) and len(skills) == 50 and skills[0] == "s00"
 
 
+@posix_only("test_windows.py::test_read_control_without_posix_open_flags", "FIFOs")
 def test_read_text_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert setup_scan.read_text(tmp_path, tmp_path) is None  # a directory
     os.mkfifo(tmp_path / "fifo")
@@ -532,6 +533,7 @@ def test_sources_only_name_known_hook_events() -> None:
     assert SetupSources((), (), (), frozenset(), ()).hook_tools_keys == frozenset()
 
 
+@posix_only("test_windows.py::test_windows_git_that_hangs_is_killed_in_time", "a git written in sh")
 def test_run_git_that_hangs_after_closing_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

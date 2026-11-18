@@ -25,11 +25,6 @@ from promptcoach_client import claude_code, gitdiff
 
 ROOT = Path(__file__).resolve().parents[1]
 HOOKS = ROOT / "plugins" / "promptcoach" / "hooks"
-NEEDS_SH = pytest.mark.skipif(
-    os.name == "nt",
-    reason="a stand-in git written in sh; on Windows "
-    "test_windows_git_runs_without_a_group_or_mask runs the same path with the real git",
-)
 
 
 @pytest.fixture
@@ -77,15 +72,12 @@ def test_windows_git_runs_without_a_group_or_mask(
     assert not gitdiff._LIVE
 
 
-@NEEDS_SH
 def test_windows_git_that_hangs_is_killed_in_time(
     windows: list[tuple[str, Any]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    fake = tmp_path / "bin"
-    fake.mkdir()
-    (fake / "git").write_text("#!/bin/sh\nexec sleep 30\n")
-    (fake / "git").chmod(0o755)
-    monkeypatch.setenv("PATH", f"{fake}{os.pathsep}{os.environ['PATH']}")
+    """A stand-in git in Python, so this runs on Windows too."""
+    hang = (sys.executable, "-c", "import time; time.sleep(30)")
+    monkeypatch.setattr(gitdiff, "GIT_COMMAND", hang)
 
     started = time.monotonic()
     assert gitdiff.run_git(["status"], tmp_path, timeout=0.5) is None
@@ -93,6 +85,18 @@ def test_windows_git_that_hangs_is_killed_in_time(
     assert time.monotonic() - started < 3
     assert "killpg" not in [name for name, _ in windows]
     assert not gitdiff._LIVE
+
+
+def test_the_per_test_timeout_works_without_sigalarm() -> None:
+    """The Windows fallback (a timer and a simulated SIGINT), run here too."""
+    import conftest
+
+    started = time.monotonic()
+    with pytest.raises(conftest.TestTimedOut), conftest.interrupt_after(0.2):
+        while time.monotonic() - started < 10:
+            time.sleep(0.01)
+    assert conftest.TIMED_OUT == [True]
+    conftest.TIMED_OUT.clear()
 
 
 def test_windows_kill_live_terminates_each_process(
@@ -276,3 +280,18 @@ def test_plugin_data_with_a_drive_letter(
     state = json.loads((Path(data) / "state.json").read_text())
     assert state["prompt_only"] is False
     shutil.rmtree(Path(data), ignore_errors=True)
+
+
+def test_unwritable_data_dir_still_blocks(
+    server: StubServer, env: dict[str, str], project: Path, tmp_path: Path
+) -> None:
+    """A data dir that can't be made (a file is in the way): the reply is kept.
+    Portable, unlike a chmod 0o555 directory, which Windows ignores."""
+    blocker = tmp_path / "in-the-way"
+    blocker.write_text("")
+    env["CLAUDE_PLUGIN_DATA"] = str(blocker / "data")
+    server.reply = {"message": "Coach: quieter now.", "block_prompt": True, "prompt_only": False}
+
+    out = run_hook("before", prompt_payload(project, "coach, quieter"), env)
+
+    assert json.loads(out) == {"decision": "block", "reason": "Coach: quieter now."}

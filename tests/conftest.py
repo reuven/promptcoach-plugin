@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import _thread
+import contextlib
 import io
 import json
 import os
@@ -70,9 +72,33 @@ def fail_if_timed_out() -> None:
         pytest.fail(f"test ran longer than {TEST_TIMEOUT_S} s")
 
 
+@contextlib.contextmanager
+def interrupt_after(seconds: float) -> Iterator[None]:
+    """Raise ``TestTimedOut`` in the main thread after ``seconds``, without SIGALRM.
+
+    Windows has no SIGALRM: a timer thread simulates a SIGINT instead, whose
+    handler raises. It can't interrupt a blocking system call (SIGALRM on
+    POSIX can), but it ends a test stuck in Python code.
+    """
+    previous = signal.signal(signal.SIGINT, _too_slow)
+    timer = threading.Timer(seconds, _thread.interrupt_main)
+    timer.daemon = True
+    timer.start()
+    try:
+        yield
+    finally:
+        timer.cancel()
+        signal.signal(signal.SIGINT, previous)
+
+
 @pytest.fixture(autouse=True)
 def _per_test_timeout() -> Iterator[None]:
     TIMED_OUT.clear()
+    if not hasattr(signal, "SIGALRM"):  # Windows
+        with interrupt_after(TEST_TIMEOUT_S):
+            yield
+        fail_if_timed_out()
+        return
     previous = signal.signal(signal.SIGALRM, _too_slow)
     signal.alarm(TEST_TIMEOUT_S)
     try:
@@ -81,6 +107,17 @@ def _per_test_timeout() -> Iterator[None]:
         signal.alarm(0)
         signal.signal(signal.SIGALRM, previous)
     fail_if_timed_out()
+
+
+def posix_only(windows_test: str, why: str) -> pytest.MarkDecorator:
+    """Skip on Windows, naming the test that covers the same behavior there.
+
+    Never a silent skip: the reason says what is POSIX-only and where the
+    Windows side is tested.
+    """
+    return pytest.mark.skipif(
+        os.name == "nt", reason=f"POSIX only ({why}); on Windows, {windows_test} covers it"
+    )
 
 
 TOKEN = "pc_" + "t" * 43  # the server's token shape; a dummy

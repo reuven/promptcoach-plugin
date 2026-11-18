@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 import conftest
-from conftest import StubServer, prompt_payload
+from conftest import StubServer, posix_only, prompt_payload
 from promptcoach_client import core, gitdiff
 from promptcoach_client.contract import MAX_REPLY_CHARS
 from promptcoach_client.redact import prints_secrets, redact
@@ -58,6 +58,7 @@ def test_words_ending_in_sk_stay(text: str) -> None:
 # --- I-2: a hang inside a hook-style handler fails the test --------------------------------
 
 
+@posix_only("test_windows.py::test_the_per_test_timeout_works_without_sigalarm", "setitimer")
 def test_timeout_escapes_hook_style_handlers() -> None:
     """The test timeout isn't an OSError or an Exception: ``except`` can't eat it."""
     assert not issubclass(conftest.TestTimedOut, Exception)
@@ -240,6 +241,7 @@ def test_reviewers_false_positives_stay(command: str) -> None:
 # --- M-6: SIGTERM can't land between git's start and its being tracked --------------------
 
 
+@posix_only("test_windows.py::test_windows_git_runs_without_a_group_or_mask", "signal masks")
 def test_sigterm_is_blocked_while_git_starts(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     masks: list[set[int]] = []
     real = subprocess.Popen

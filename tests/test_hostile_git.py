@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import StubServer, git, prompt_payload, run_hook, stop_payload
+from conftest import StubServer, git, posix_only, prompt_payload, run_hook, stop_payload
 from promptcoach_client import gitdiff
 
 
@@ -470,6 +470,7 @@ def test_symlinked_git_dir_entries_are_refused(entry: str, tmp_path: Path) -> No
     assert not gitdiff._no_symlinks(git_dir, gitdiff.Deadline(10))
 
 
+@posix_only("no test (chmod can't make a directory unreadable there)", "an unreadable directory")
 def test_git_dir_walk_edge_cases(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, repo: Path
 ) -> None:
@@ -574,6 +575,10 @@ def test_git_dir_over_the_cap_means_no_diff(
 # --- mutation survivors of this round: process group, no spawn without time ---------------
 
 
+@posix_only(
+    "test_windows.py::test_windows_git_that_hangs_is_killed_in_time",
+    "process groups; on Windows git alone is killed, see docs/windows.md",
+)
 def test_a_stopped_git_takes_its_children_with_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

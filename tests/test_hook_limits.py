@@ -21,6 +21,7 @@ from conftest import (
     ORDINARY_PROMPTS,
     TOKEN,
     StubServer,
+    posix_only,
     prompt_payload,
     run_hook,
     stop_payload,
@@ -54,6 +55,7 @@ def _slow_git(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seconds: float) -
 # --- I4 / M5: one deadline per hook ------------------------------------------------------
 
 
+@posix_only("test_windows.py::test_windows_git_that_hangs_is_killed_in_time", "a git written in sh")
 def test_after_fits_its_budget_with_slow_git_and_a_slow_server(
     server: StubServer,
     env: dict[str, str],
@@ -74,6 +76,7 @@ def test_after_fits_its_budget_with_slow_git_and_a_slow_server(
     assert core.AFTER_BUDGET_S <= 13.5
 
 
+@posix_only("test_windows.py::test_windows_git_that_hangs_is_killed_in_time", "a git written in sh")
 def test_before_fits_its_budget_with_slow_git_and_a_slow_server(
     server: StubServer,
     env: dict[str, str],
@@ -123,6 +126,7 @@ def test_deadline() -> None:
 # --- M3: a read-only data dir never loses the reply ---------------------------------------
 
 
+@posix_only("test_windows.py::test_unwritable_data_dir_still_blocks", "chmod 0o555")
 def test_read_only_data_dir_still_blocks(
     server: StubServer, env: dict[str, str], project: Path, data_dir: Path
 ) -> None:
