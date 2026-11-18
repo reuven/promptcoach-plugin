@@ -274,41 +274,7 @@ def test_redirect_to_another_port_never_gets_the_token(
     assert TOKEN not in json.dumps([r.headers for r in other_server.requests])
 
 
-# --- M2: python3 -I, so the project's own modules never load -------------------------------
-
-
-def test_hooks_run_python_isolated() -> None:
-    hooks = json.loads(HOOKS_JSON.read_text())["hooks"]
-    for groups in hooks.values():
-        for group in groups:
-            for hook in group["hooks"]:
-                assert hook["command"] == "python3"
-                assert hook["args"][0] == "-I"
-
-
-def test_project_json_py_never_runs(tmp_path: Path, data_dir: Path) -> None:
-    project = tmp_path / "evil-project"
-    project.mkdir()
-    marker = tmp_path / "MARKER"
-    (project / "json.py").write_text(f"open({str(marker)!r}, 'w').write('ran')\n")
-    hook = json.loads(HOOKS_JSON.read_text())["hooks"]["UserPromptSubmit"][0]["hooks"][0]
-    args = [
-        a.replace("${CLAUDE_PLUGIN_ROOT}", str(ROOT / "plugins" / "promptcoach"))
-        for a in hook["args"]
-    ]
-
-    subprocess.run(
-        [sys.executable, *args],
-        input="{}",
-        cwd=project,
-        env={"PATH": os.environ["PATH"], "PYTHONPATH": ".", "CLAUDE_PLUGIN_DATA": str(data_dir)},
-        capture_output=True,
-        text=True,
-        timeout=10,
-        check=False,
-    )
-
-    assert not marker.exists()
+# --- M2: python -I lives in test_hook_command.py ------------------------------------------
 
 
 def test_adapter_never_blocks_at_the_end_of_a_turn(

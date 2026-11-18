@@ -15,26 +15,6 @@ PLUGIN = ROOT / "plugins" / "promptcoach"
 CLIENT = PLUGIN / "hooks" / "promptcoach_client"
 
 
-def _hook(mode: str, timeout: int) -> dict[str, object]:
-    return {
-        "type": "command",
-        "command": "python3",
-        "args": ["-I", "${CLAUDE_PLUGIN_ROOT}/hooks/coach_hook.py", mode],
-        "timeout": timeout,
-    }
-
-
-def test_hooks_json_wires_every_event() -> None:
-    hooks = json.loads((PLUGIN / "hooks" / "hooks.json").read_text())["hooks"]
-
-    assert hooks == {
-        "UserPromptSubmit": [{"hooks": [_hook("before", 3)]}],
-        "PostToolUse": [{"matcher": "Bash", "hooks": [_hook("record", 2)]}],
-        "PostToolUseFailure": [{"matcher": "Bash", "hooks": [_hook("record", 2)]}],
-        "Stop": [{"hooks": [_hook("after", 15)]}],
-    }
-
-
 def test_user_config() -> None:
     manifest = json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text())
     config = manifest["userConfig"]
