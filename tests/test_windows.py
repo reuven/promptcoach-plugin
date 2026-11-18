@@ -377,10 +377,13 @@ class FakeJobs:
     """The Job Object layer, faked: records calls; terminate kills what was
     assigned (and, as a real job would, the grandchild)."""
 
-    def __init__(self, pid_file: Path | None = None, create_ok: bool = True) -> None:
+    def __init__(
+        self, pid_file: Path | None = None, create_ok: bool = True, assign_ok: bool = True
+    ) -> None:
         self.calls: list[tuple[str, Any]] = []
         self.pid_file = pid_file
         self.create_ok = create_ok
+        self.assign_ok = assign_ok
 
     def create(self) -> int | None:
         self.calls.append(("create", None))
@@ -388,7 +391,7 @@ class FakeJobs:
 
     def assign(self, job: int, proc: subprocess.Popen[bytes]) -> bool:
         self.calls.append(("assign", proc.pid))
-        return True
+        return self.assign_ok
 
     def terminate(self, job: int) -> None:
         self.calls.append(("terminate", job))
@@ -543,3 +546,16 @@ def test_exit_cleanup_waits_for_a_git_that_is_starting_and_kills_it(
         for proc in procs:
             proc.kill()
         thread.join(5)
+
+
+def test_windows_job_that_cannot_take_git_is_closed_at_once(
+    repo: Path, windows: list[tuple[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AssignProcessToJobObject can fail (git already in a job that forbids
+    nesting): the job is closed, and git runs untracked by any job."""
+    jobs = FakeJobs(assign_ok=False)
+    monkeypatch.setattr(gitdiff, "_JOBS", jobs)
+
+    assert gitdiff.run_git(["rev-parse", "--is-inside-work-tree"], repo) is not None
+    assert [name for name, _ in jobs.calls] == ["create", "assign", "close"]
+    assert not gitdiff._JOB_OF

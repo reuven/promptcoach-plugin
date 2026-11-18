@@ -253,7 +253,17 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-_OPENER = urllib.request.build_opener(_NoRedirect)
+_OPENERS: list[urllib.request.OpenerDirector] = []  # built once, on first use
+
+
+def _opener() -> urllib.request.OpenerDirector:
+    """The no-redirect opener, built when first needed, never at import:
+    building it makes an SSL context, which can fail (Python on Windows
+    without SYSTEMROOT raises ssl.SSLError). Inside ``post`` that is one more
+    way of getting no answer, not a crash."""
+    if not _OPENERS:
+        _OPENERS.append(urllib.request.build_opener(_NoRedirect))
+    return _OPENERS[0]
 
 
 def post(
@@ -292,7 +302,7 @@ def post(
             headers=headers,
         )
         try:
-            with _OPENER.open(request, timeout=timeout) as response:
+            with _opener().open(request, timeout=timeout) as response:
                 raw = response.read(MAX_REPLY_BYTES + 1) if response.status == 200 else b""
             data = json.loads(raw) if 0 < len(raw) <= MAX_REPLY_BYTES else None
         except urllib.error.HTTPError as error:  # 4xx, 5xx, or a refused redirect
