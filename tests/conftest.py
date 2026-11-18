@@ -140,8 +140,85 @@ def pytest_configure(config: pytest.Config) -> None:
     _arm("collecting")
 
 
+# Every process the suite's own Popen starts. A process that outlives the
+# suite can hold a pipe open (CI's step output among them) and keep a job
+# running after every kill. At the session's end, any of them still alive,
+# or anything in a process group one of them leads (a git started with
+# start_new_session, and what it started), is named, killed, and fails the
+# run. POSIX only: it reads ps.
+_STARTED: set[int] = set()
+_real_popen_init = subprocess.Popen.__init__
+_SURVIVOR_GRACE_S = 3.0
+
+
+def _recording_init(self: subprocess.Popen[Any], *args: Any, **kwargs: Any) -> None:
+    _real_popen_init(self, *args, **kwargs)
+    _STARTED.add(self.pid)
+
+
+subprocess.Popen.__init__ = _recording_init  # type: ignore[method-assign]
+
+
+def survivors(started: set[int], ps_output: str, me: int) -> list[str]:
+    """The ``ps -A -o pid=,pgid=,stat=,command=`` rows still alive (not
+    zombies) whose pid or process group is in ``started``, other than ``me``."""
+    rows = []
+    for line in ps_output.splitlines():
+        fields = line.split(None, 3)
+        if len(fields) < 3 or not (fields[0].isdigit() and fields[1].isdigit()):
+            continue
+        pid, pgid, state = int(fields[0]), int(fields[1]), fields[2]
+        if pid != me and not state.startswith("Z") and (pid in started or pgid in started):
+            rows.append(line.strip())
+    return rows
+
+
+def _ps() -> str:
+    """Every process, from ``ps``, which is then no longer tracked itself
+    (it lists itself while it runs)."""
+    proc = subprocess.Popen(
+        ["ps", "-A", "-o", "pid=,pgid=,stat=,command="],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    try:
+        out, _ = proc.communicate(timeout=10)
+    except subprocess.TimeoutExpired:  # pragma: no cover - ps hung
+        proc.kill()
+        out, _ = proc.communicate()
+    _STARTED.discard(proc.pid)
+    return out
+
+
+def _check_survivors(session: pytest.Session) -> None:
+    if os.name == "nt" or not _STARTED:
+        return
+    # Well inside the watchdog's limit (2 s in a child run).
+    deadline = time.monotonic() + min(_SURVIVOR_GRACE_S, HARD_LIMIT_S / 4)
+    left = survivors(_STARTED, _ps(), os.getpid())
+    while left and time.monotonic() < deadline:
+        time.sleep(0.2)
+        left = survivors(_STARTED, _ps(), os.getpid())
+    if not left:
+        return
+    reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+    lines = ["processes still running after the suite (killed now):", *left]
+    for line in lines:
+        if reporter is not None:
+            reporter.write_line(line)
+        else:  # pragma: no cover - pytest always has one
+            sys.stderr.write(line + "\n")
+    for row in left:
+        with contextlib.suppress(OSError):
+            os.kill(int(row.split()[0]), signal.SIGKILL)
+    session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
+
 def pytest_sessionfinish(session: pytest.Session) -> None:
     _arm("session finishing")
+    _check_survivors(session)
 
 
 def pytest_unconfigure(config: pytest.Config) -> None:

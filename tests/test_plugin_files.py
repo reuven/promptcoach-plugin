@@ -232,7 +232,10 @@ def test_ci_names_a_hung_test() -> None:
     assert step_minutes * 60 >= deadline + 60
     assert job_minutes >= step_minutes + 5
     printed = re.search(
-        r"if: \$\{\{ always\(\) \}\}\n\s+shell: bash\n\s+run: \|\n(.*?)(?=\n      - )", check, re.S
+        r"- name: The end of the run's output, and the hang log\n\s+if: \$\{\{ always\(\) \}\}\n"
+        r"\s+shell: bash\n\s+run: \|\n(.*?)(?=\n      - )",
+        check,
+        re.S,
     )
     assert printed is not None
     assert 'tail -n 300 "$RUNNER_TEMP/pytest-output.log"' in printed.group(1)

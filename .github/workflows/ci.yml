@@ -64,6 +64,13 @@ jobs:
         env:
           COVERAGE_FILE: .coverage.${{ matrix.os }}-${{ matrix.python }}
           PROMPTCOACH_HANG_LOG: ${{ runner.temp }}/pytest-hang.log
+      # Whatever is still running once the tests are over: a process left
+      # behind can hold a pipe open and keep a step from ending.
+      - name: Processes still running
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then tasklist; else ps -ef; fi
       - name: The end of the run's output, and the hang log
         if: ${{ always() }}
         shell: bash
