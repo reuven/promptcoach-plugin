@@ -11,8 +11,10 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
+import time
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -383,6 +385,67 @@ def child_env(env: Mapping[str, str] | None = None, path: str | None = None) -> 
     base = {"PATH": os.environ["PATH"] if path is None else path}
     base.update({k: os.environ[k] for k in _WINDOWS_VARS if k in os.environ})
     return {**base, **(env or {})}
+
+
+@dataclass(frozen=True)
+class ChildRun:
+    """What a child pytest did: its status, wall time, output and hang log."""
+
+    code: int
+    seconds: float
+    output: str
+    hang_log: str
+
+
+CHILD_DEPTH = "PROMPTCOACH_CHILD_DEPTH"
+
+
+def run_child_pytest(
+    tmp_path: Path, name: str, source: str, extra_args: list[str] | None = None
+) -> ChildRun:
+    """Run one test file in a child pytest with this conftest and a 2 s hard
+    limit, sealed off from the run that starts it.
+
+    Why sealed: a child that picked up the repo's config (addopts,
+    testpaths), PYTEST_ADDOPTS, or CI's environment could run the whole
+    suite again, including the test that started it, and multiply. So the
+    child gets its own empty pytest.ini and rootdir, one explicit file, no
+    cache or coverage plugin, and a fresh environment carrying CHILD_DEPTH;
+    and a child never starts another (this raises instead).
+    """
+    if os.environ.get(CHILD_DEPTH):
+        raise RuntimeError("already inside a child pytest: refusing to start another")
+    (tmp_path / name).write_text(source)
+    (tmp_path / "pytest.ini").write_text("[pytest]\n")
+    log = tmp_path / "hang.log"
+    tests = Path(__file__).resolve().parent
+    env = child_env(
+        {
+            "PYTHONPATH": os.pathsep.join(
+                [str(tests), str(tests.parent / "plugins/promptcoach/hooks")]
+            ),
+            "PROMPTCOACH_TEST_HARD_LIMIT_S": "2",
+            "PROMPTCOACH_HANG_LOG": str(log),
+            CHILD_DEPTH: "1",
+        }
+    )
+    argv = [sys.executable, "-m", "pytest", "-c", str(tmp_path / "pytest.ini")]
+    argv += ["--rootdir", str(tmp_path), "-p", "conftest", "-p", "no:cacheprovider"]
+    argv += ["-p", "no:cov", "-q", *(extra_args or []), str(tmp_path / name)]
+    started = time.monotonic()
+    done = subprocess.run(
+        argv,
+        cwd=tmp_path,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    hang_log = log.read_text() if log.exists() else ""
+    return ChildRun(done.returncode, time.monotonic() - started, done.stdout, hang_log)
 
 
 def run_hook(mode: str, payload: object, env: dict[str, str]) -> str:

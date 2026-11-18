@@ -45,7 +45,18 @@ jobs:
       # tools/ci_run.py SIGKILLs pytest's whole process group (taskkill /T
       # on Windows) at its deadline, which nothing in the run can ignore, and
       # keeps the output in a file. The step's limit is a last resort above it.
-      - run: uv run python tools/ci_run.py --output "${{ runner.temp }}/pytest-output.log" --deadline 480 -- uv run pytest -v --cov-fail-under=0
+      # What this cell collects, before running anything: a difference
+      # between the 3.9 and 3.14 cells shows here.
+      - name: Collect
+        timeout-minutes: 3
+        run: uv run python tools/ci_run.py --output "${{ runner.temp }}/pytest-collect.log" --deadline 120 -- uv run pytest --collect-only -q --no-cov
+      # A soft process limit (POSIX; Git Bash on Windows has none), and the
+      # runner also stops the run if its group passes 500 processes.
+      - name: Tests
+        shell: bash
+        run: |
+          ulimit -S -u 3000 2>/dev/null || echo "no process limit set here"
+          uv run python tools/ci_run.py --output "${{ runner.temp }}/pytest-output.log" --deadline 480 -- uv run pytest -v --cov-fail-under=0
         timeout-minutes: 10
         env:
           COVERAGE_FILE: .coverage.${{ matrix.os }}-${{ matrix.python }}
