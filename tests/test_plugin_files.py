@@ -304,3 +304,45 @@ def test_the_diagnostic_workflow_runs_only_on_diag_branches() -> None:
     for step in steps:
         assert "continue-on-error: true" in step, step
         assert "timeout-minutes: 3" in step, step
+
+
+MAX_NODEID_CHARS = 200
+
+
+def test_every_test_id_is_short() -> None:
+    """A parameter used as its own id puts the whole value in the test's name
+    (pytest 8, the last release for Python 3.9, does that for any string).
+    ``-v`` and ``--collect-only`` print every name, and GitHub's runner took
+    8 and 16 minutes over two 1 MB lines (line handling and secret masking),
+    with pytest blocked on the full pipe: every 3.9 cell hung there. Long
+    parameters get explicit short ``ids=``."""
+    import subprocess
+
+    from conftest import CHILD_DEPTH, child_env
+
+    done = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "--collect-only",
+            "-q",
+            "--no-cov",
+            "-p",
+            "no:cacheprovider",
+        ],
+        cwd=ROOT,
+        env=child_env({CHILD_DEPTH: "1"}),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=90,
+        check=False,
+    )
+    assert done.returncode == 0, done.stdout[-2000:] + done.stderr[-2000:]
+    ids = [line for line in done.stdout.splitlines() if "::" in line]
+    assert len(ids) > 900
+    # Each long id is named by its first 100 characters and its length, so
+    # this failure can't flood a log the way the ids themselves did.
+    too_long = [f"{n[:100]}... ({len(n)} chars)" for n in ids if len(n) > MAX_NODEID_CHARS]
+    assert not too_long, "\n".join(too_long)
