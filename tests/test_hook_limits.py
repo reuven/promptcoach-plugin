@@ -300,6 +300,74 @@ def test_stuck_in_a_blocking_call():
 """
 
 
+# A test that passes but leaves a thread nobody stops: Python waits for it at
+# exit, after every test, where a per-test watchdog no longer looks.
+STUCK_AT_EXIT = """
+import threading
+
+def test_passes_but_leaves_a_thread_behind():
+    threading.Thread(target=threading.Event().wait, daemon=False).start()
+"""
+
+
+def _run_backstopped(tmp_path: Path, name: str, source: str) -> tuple[int, float, str]:
+    """Run one test file in a child pytest with the conftest and a 2 s hard
+    limit: (its exit status, its wall time, the hang log)."""
+    (tmp_path / name).write_text(source)
+    log = tmp_path / "hang.log"
+    tests = Path(__file__).resolve().parent
+    env = child_env(
+        {
+            "PYTHONPATH": os.pathsep.join(
+                [str(tests), str(tests.parent / "plugins/promptcoach/hooks")]
+            ),
+            "PROMPTCOACH_TEST_HARD_LIMIT_S": "2",
+            "PROMPTCOACH_HANG_LOG": str(log),
+        }
+    )
+    started = time.monotonic()
+    done = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-p",
+            "conftest",
+            "-p",
+            "no:cacheprovider",
+            "-o",
+            "addopts=",
+            "-q",
+            str(tmp_path / name),
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    return done.returncode, time.monotonic() - started, log.read_text()
+
+
+def test_a_hang_after_the_last_test_dumps_every_stack_and_ends_the_run(tmp_path: Path) -> None:
+    """The watchdog stays armed from start to exit, not just inside tests."""
+    code, seconds, text = _run_backstopped(tmp_path, "test_exit.py", STUCK_AT_EXIT)
+
+    assert code != 0
+    assert seconds < 30
+    assert "after test_exit.py::test_passes_but_leaves_a_thread_behind" in text
+    assert "exiting" in text
+    assert "Timeout" in text and "wait" in text.rsplit("exiting", 1)[-1]
+
+
+def test_a_run_without_a_hang_exits_cleanly(tmp_path: Path) -> None:
+    code, _, text = _run_backstopped(tmp_path, "test_fine.py", "def test_fine():\n    pass\n")
+
+    assert code == 0
+    assert "running test_fine.py::test_fine" in text and "Timeout" not in text
+
+
 def test_a_hung_test_dumps_its_stack_and_ends_the_run(tmp_path: Path) -> None:
     """The per-test timer can't interrupt a blocking call on Windows; the
     faulthandler backstop can: past the hard limit it writes every thread's
