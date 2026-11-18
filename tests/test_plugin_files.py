@@ -113,3 +113,12 @@ def test_python_39_is_the_floor() -> None:
     assert 'python_version = "3.9"' in pyproject
     assert 'target-version = "py39"' in pyproject
     assert 'python: ["3.9", "3.14"]' in (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+
+
+def test_ci_runs_on_every_os_with_both_pythons() -> None:
+    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    assert "runs-on: ${{ matrix.os }}" in ci
+    assert "os: [ubuntu-latest, windows-latest, macos-latest]" in ci
+    assert 'python: ["3.9", "3.14"]' in ci
+    uses = re.findall(r"uses: (\S+)", ci)
+    assert uses and all(re.fullmatch(r"[\w.-]+/[\w.-]+@[0-9a-f]{40}", u) for u in uses)
