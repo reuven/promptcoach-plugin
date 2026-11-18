@@ -157,7 +157,7 @@ def test_ci_gates_coverage_on_the_union_of_every_cell() -> None:
     # under its own name and uploading it even when a test failed.
     assert "COVERAGE_FILE: .coverage.${{ matrix.os }}-${{ matrix.python }}" in check
     [pytest_step] = re.findall(r"(uv run python tools/ci_run\.py .*-- uv run pytest -v.*)", check)
-    assert pytest_step.endswith(" -- uv run pytest -v --cov-fail-under=0")
+    assert pytest_step.endswith(" -- uv run pytest -v --durations=25 --cov-fail-under=0")
     assert "runner.os" not in check and "matrix.os ==" not in check
     assert "continue-on-error" not in check
     assert re.search(r"actions/upload-artifact@[0-9a-f]{40}", check)
@@ -215,6 +215,8 @@ def test_ci_names_a_hung_test() -> None:
     body = step.group(1)
     # A process limit on POSIX (Git Bash on Windows has none), then the runner.
     assert "ulimit -S -u 3000" in body
+    # A memory limit on Linux only: macOS ignores -v.
+    assert 'if [ "$(uname)" = Linux ]; then ulimit -S -v 4194304' in body
     [command] = re.findall(r"(uv run python tools/ci_run\.py .*-- uv run pytest -v .*)", body)
     rest = body
     out = "${{ runner.temp }}/pytest-output.log"

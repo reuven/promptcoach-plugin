@@ -215,3 +215,69 @@ def test_counting_never_fails_the_run(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(subprocess, "run", broken)
     assert ci_run.count_group(1, windows=False) is None
     assert ci_run.count_group(1, windows=True) is None
+
+
+# --- the group's memory (RSS), and a cap on it -----------------------------------------------
+
+PS_RSS = """    1     1   4000
+  500   500  10240
+  501   500  20480
+  502   500      0
+  600   600  99999
+  bad   500    100
+"""
+
+
+def test_group_rss_sums_only_that_group_in_kb() -> None:
+    assert ci_run.group_rss_kb(500, PS_RSS) == 30720
+    assert ci_run.group_rss_kb(600, PS_RSS) == 99999
+    assert ci_run.group_rss_kb(700, PS_RSS) == 0
+    assert ci_run.group_size(500, PS_RSS) == 3  # the count reads the same lines
+
+
+def test_usage_is_none_on_windows_and_on_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert ci_run.group_usage(1, windows=True) is None
+
+    def broken(*args: Any, **kwargs: Any) -> None:
+        raise OSError("no ps")
+
+    monkeypatch.setattr(subprocess, "run", broken)
+    assert ci_run.group_usage(1, windows=False) is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="ps and RSS are read on POSIX only")
+def test_a_run_reports_its_peak_rss(tmp_path: Path) -> None:
+    output = tmp_path / "out.log"
+    script = "import time; block = bytearray(80 * 1024 * 1024); time.sleep(1.5)"
+
+    code = ci_run.run([sys.executable, "-c", script], output, 30, echo=io.StringIO(), poll_s=0.3)
+
+    assert code == 0
+    [peak] = re.findall(r"ci_run: peak group RSS (\d+) MB", output.read_text())
+    assert int(peak) >= 80
+
+
+@pytest.mark.skipif(os.name == "nt", reason="ps and RSS are read on POSIX only")
+def test_memory_past_the_cap_kills_the_group(tmp_path: Path) -> None:
+    """A run whose memory grows (a property that keeps allocating) is stopped
+    at the cap, before the machine swaps until nothing answers."""
+    output = tmp_path / "out.log"
+    script = (
+        "import time\n"
+        "blocks = []\n"
+        "for _ in range(40):\n"
+        "    blocks.append(bytearray(10 * 1024 * 1024))\n"
+        "    time.sleep(0.05)\n"
+        "time.sleep(60)\n"
+    )
+    started = time.monotonic()
+
+    code = ci_run.run(
+        [sys.executable, "-c", script], output, 60, echo=io.StringIO(), poll_s=0.2, max_rss_mb=100
+    )
+
+    assert code == ci_run.TOO_MUCH_MEMORY
+    assert time.monotonic() - started < 20
+    text = output.read_text()
+    assert re.search(r"ci_run: group RSS \d+ MB passed the 100 MB cap; killed it", text)
+    assert "ci_run: peak group RSS" in text
