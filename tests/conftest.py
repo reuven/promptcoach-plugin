@@ -160,7 +160,7 @@ subprocess.Popen.__init__ = _recording_init  # type: ignore[method-assign]
 
 
 def survivors(started: set[int], ps_output: str, me: int) -> list[str]:
-    """The ``ps -A -o pid=,pgid=,stat=,command=`` rows still alive (not
+    """The ``ps -A -ww -o pid=,pgid=,stat=,command=`` rows still alive (not
     zombies) whose pid or process group is in ``started``, other than ``me``."""
     rows = []
     for line in ps_output.splitlines():
@@ -173,11 +173,15 @@ def survivors(started: set[int], ps_output: str, me: int) -> list[str]:
     return rows
 
 
+# -ww: procps cuts rows to 80 columns when writing to a pipe.
+PS_ARGV = ["ps", "-A", "-ww", "-o", "pid=,pgid=,stat=,command="]
+
+
 def _ps() -> str:
     """Every process, from ``ps``, which is then no longer tracked itself
     (it lists itself while it runs)."""
     proc = subprocess.Popen(
-        ["ps", "-A", "-o", "pid=,pgid=,stat=,command="],
+        PS_ARGV,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
