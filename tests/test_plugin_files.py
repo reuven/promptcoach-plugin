@@ -215,8 +215,11 @@ def test_ci_names_a_hung_test() -> None:
     body = step.group(1)
     # A process limit on POSIX (Git Bash on Windows has none), then the runner.
     assert "ulimit -S -u 3000" in body
-    # A memory limit on Linux only: macOS ignores -v.
-    assert 'if [ "$(uname)" = Linux ]; then ulimit -S -v 4194304' in body
+    # No virtual-memory limit: .NET (pwsh, which the PowerShell hook tests
+    # run) reserves far more address space than it uses and aborts under one.
+    # ci_run's RSS cap is the memory guard.
+    assert "ulimit -S -v" not in body
+    assert "ulimit -v" not in body
     [command] = re.findall(r"(uv run python tools/ci_run\.py .*-- uv run pytest -v .*)", body)
     rest = body
     out = "${{ runner.temp }}/pytest-output.log"

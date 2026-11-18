@@ -436,3 +436,11 @@ def test_survivors_are_found_by_pid_or_group() -> None:
     ps = "  10  10 S  python a\n  11  10 S  sleep 60\n  12  12 Z  (python)\n  13  99 S  other\n"
     found = conftest.survivors({10, 12}, ps, me=1)
     assert [row.split()[0] for row in found] == ["10", "11"]
+
+
+def test_survivor_rows_are_never_cut_to_the_terminal_width() -> None:
+    """procps ps cuts each row to 80 columns when its output is a pipe, which
+    hid the command on Linux CI; -ww keeps the whole command line."""
+    import conftest
+
+    assert "-ww" in conftest.PS_ARGV
