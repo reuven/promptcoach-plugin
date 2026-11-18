@@ -40,9 +40,17 @@ jobs:
       # not per cell: Windows can't run the POSIX branches and macOS and Linux
       # can't run the Windows ones, so each cell covers only its own share.
       # A cell still fails on any failed test.
-      - run: uv run pytest --cov-fail-under=0
+      # -v names each test before it runs; a test stuck past the conftest's
+      # hard limit (150 s) dumps every thread's stack to the hang log and
+      # ends the run, which the next step prints.
+      - run: uv run pytest -v --cov-fail-under=0
         env:
           COVERAGE_FILE: .coverage.${{ matrix.os }}-${{ matrix.python }}
+          PROMPTCOACH_HANG_LOG: ${{ runner.temp }}/pytest-hang.log
+      - name: The last test that ran, and every thread's stack if one hung
+        if: ${{ failure() }}
+        shell: bash
+        run: tail -n 200 "$RUNNER_TEMP/pytest-hang.log" || true
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ !cancelled() }}
         with:

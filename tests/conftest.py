@@ -4,17 +4,19 @@ from __future__ import annotations
 
 import _thread
 import contextlib
+import faulthandler
 import io
 import json
 import os
 import signal
 import subprocess
+import tempfile
 import threading
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 import pytest
 from hypothesis import settings
@@ -89,6 +91,49 @@ def interrupt_after(seconds: float) -> Iterator[None]:
     finally:
         timer.cancel()
         signal.signal(signal.SIGINT, previous)
+
+
+# The backstop behind TEST_TIMEOUT_S. On Windows the per-test timer can't
+# interrupt a blocking call (a pipe read, a wait), so a hung test would hold
+# the run until CI's job timeout, which keeps no log. Past HARD_LIMIT_S,
+# faulthandler writes every thread's stack to the hang log and exits the run
+# non-zero. A file, not stderr: pytest captures stderr, and exiting loses it.
+# Each test's name goes in first, so the log says which one hung.
+HARD_LIMIT_S = float(os.environ.get("PROMPTCOACH_TEST_HARD_LIMIT_S", TEST_TIMEOUT_S + 30))
+HANG_LOG = Path(
+    os.environ.get("PROMPTCOACH_HANG_LOG")
+    or Path(tempfile.gettempdir()) / f"promptcoach-pytest-hang-{os.getpid()}.log"
+)
+_HANG_FILES: list[IO[str]] = []
+
+
+def _hang_file() -> IO[str]:
+    if not _HANG_FILES:
+        _HANG_FILES.append(HANG_LOG.open("w", encoding="utf-8"))
+    return _HANG_FILES[0]
+
+
+def pytest_unconfigure(config: pytest.Config) -> None:
+    """The run ended without a hang: close the log, and drop it unless CI
+    asked for it. (After a hang the process is gone and the log stays.)"""
+    for log in _HANG_FILES:
+        log.close()
+    _HANG_FILES.clear()
+    if not os.environ.get("PROMPTCOACH_HANG_LOG"):
+        with contextlib.suppress(OSError):
+            HANG_LOG.unlink()
+
+
+@pytest.fixture(autouse=True)
+def _hard_limit(request: pytest.FixtureRequest) -> Iterator[None]:
+    log = _hang_file()
+    log.write(f"running {request.node.nodeid}\n")
+    log.flush()
+    faulthandler.dump_traceback_later(HARD_LIMIT_S, exit=True, file=log)
+    try:
+        yield
+    finally:
+        faulthandler.cancel_dump_traceback_later()
 
 
 @pytest.fixture(autouse=True)
