@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import functools
 import math
 import os
 import re
@@ -119,12 +120,15 @@ class Area:
 _LIVE: set[int] = set()
 _PREVIOUS_TERM: Any = signal.SIG_DFL
 _CLEANUP_INSTALLED: list[bool] = []
+# Threads whose SIGTERM came while git was starting there (the signal blocked):
+# run_git hands it back to the handler as soon as git is in _LIVE.
+_PENDING_TERM: set[int] = set()
 
 
 # Held while git starts and is recorded in _LIVE, so the SIGTERM handler
-# (which runs in the main thread) can't run in between and miss it.
-# Reentrant: a SIGTERM that arrived just before the mask is handled in the
-# main thread, maybe while that same thread holds this; it mustn't deadlock.
+# (which runs in the main thread) and the exit cleanup can't run in between
+# and miss it. Reentrant: a SIGTERM handled during the exit cleanup takes it
+# again in the same thread, and mustn't deadlock.
 _STARTING = threading.RLock()
 
 
@@ -136,8 +140,22 @@ def _kill_live() -> None:
         _LIVE.discard(pgid)
 
 
+def _exit_cleanup() -> None:
+    """At exit: kill the running git, waiting for one that is just starting."""
+    with _STARTING:
+        _kill_live()
+
+
 def _on_term(signum: int, frame: object) -> None:
-    """SIGTERM: kill the running git first, then do what SIGTERM did before."""
+    """SIGTERM: kill the running git first, then do what SIGTERM did before.
+
+    Python runs this handler late, at its next check: a SIGTERM that came just
+    before run_git blocked it can land inside git's start, in this thread.
+    Then it waits, and run_git runs it again once git is in _LIVE.
+    """
+    if signal.SIGTERM in signal.pthread_sigmask(signal.SIG_BLOCK, []):
+        _PENDING_TERM.add(threading.get_ident())
+        return
     with _STARTING:
         _kill_live()
     if callable(_PREVIOUS_TERM):
@@ -153,7 +171,7 @@ def install_cleanup() -> None:
     if _CLEANUP_INSTALLED:
         return
     _CLEANUP_INSTALLED.append(True)
-    atexit.register(_kill_live)
+    atexit.register(_exit_cleanup)
     _PREVIOUS_TERM = signal.getsignal(signal.SIGTERM)
     signal.signal(signal.SIGTERM, _on_term)
 
@@ -199,8 +217,8 @@ def run_git(
         return None
     # SIGTERM is blocked in this thread, and the handler kept out by the
     # lock, from git's start until it is in _LIVE: a stop then always finds
-    # it. (git inherits the blocked SIGTERM; it is always stopped with
-    # SIGKILL, so that changes nothing.)
+    # it. git itself gets SIGTERM unblocked, so an orphan (a hook killed with
+    # SIGKILL) still obeys a later SIGTERM.
     mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
     try:
         with _STARTING:
@@ -213,12 +231,18 @@ def run_git(
                 stderr=subprocess.DEVNULL,
                 env=_env(index_file),
                 start_new_session=True,
+                preexec_fn=functools.partial(
+                    signal.pthread_sigmask, signal.SIG_UNBLOCK, (signal.SIGTERM,)
+                ),
             )
             _LIVE.add(proc.pid)
     except OSError:  # git missing, cwd gone
         return None
     finally:
         signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+        if threading.get_ident() in _PENDING_TERM:
+            _PENDING_TERM.discard(threading.get_ident())
+            _on_term(signal.SIGTERM, None)
     chunks: list[bytes] = []
     stdout = proc.stdout
     assert stdout is not None  # noqa: S101 - PIPE always sets it

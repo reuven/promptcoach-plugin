@@ -221,15 +221,15 @@ def test_before_budget_counts_from_the_process_start(
 
 # --- M2: SIGTERM inside git's start, at exit, and in git itself -----------------------------
 
-FAKE_GIT = "#!/bin/sh\necho $$ > {pid}\nexec sleep 30\n"
+FAKE_GIT = "#!/bin/sh\necho $$ > {pid}\nexec sleep {seconds}\n"
 
 
-def _fake_git(tmp_path: Path) -> tuple[Path, Path]:
+def _fake_git(tmp_path: Path, seconds: str = "30") -> tuple[Path, Path]:
     """A ``git`` that records its pid and sleeps: (its bin directory, the pid file)."""
     pid_file = tmp_path / "git.pid"
     fake = tmp_path / "bin"
     fake.mkdir()
-    (fake / "git").write_text(FAKE_GIT.format(pid=pid_file))
+    (fake / "git").write_text(FAKE_GIT.format(pid=pid_file, seconds=seconds))
     (fake / "git").chmod(0o755)
     return fake, pid_file
 
@@ -254,15 +254,22 @@ def _gone(pid: int) -> bool:
 
 
 def _run_child(script: str, tmp_path: Path) -> tuple[int, int]:
-    """Run ``script`` with the fake git: (its exit status, git's pid)."""
-    fake, pid_file = _fake_git(tmp_path)
+    """Run ``script`` with the fake git: (its exit status, how many of its gits
+    are left running). Each git sleeps a time no other test uses, so it can be
+    found by its command line even if it was killed before writing its pid."""
+    seconds = f"30.{os.getpid()}{time.monotonic_ns() % 10**6}"
+    fake, pid_file = _fake_git(tmp_path, seconds)
     child = subprocess.run(
         [sys.executable, "-I", "-c", script, str(HOOK.parent), str(tmp_path), str(pid_file)],
         env={"PATH": f"{fake}{os.pathsep}{os.environ['PATH']}"},
         timeout=20,
         check=False,
     )
-    return child.returncode, _wait_for_pid(pid_file)
+    time.sleep(0.3)
+    pattern = f"sleep {seconds}"
+    left = subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True, check=False)
+    subprocess.run(["pkill", "-9", "-f", pattern], check=False)
+    return child.returncode, len(left.stdout.split())
 
 
 CHILD_HEAD = """
@@ -293,16 +300,16 @@ while not pid_file.exists() or not pid_file.read_text().strip():
 def test_sigterm_while_another_thread_starts_git_kills_it(tmp_path: Path) -> None:
     """The handler waits for the starting thread (R10: no lock in the handler)."""
     script = CHILD_HEAD + SLOW_START + "os.kill(os.getpid(), signal.SIGTERM)\ntime.sleep(30)\n"
-    code, git_pid = _run_child(script, tmp_path)
+    code, orphans = _run_child(script, tmp_path)
     assert code == -signal.SIGTERM
-    assert _gone(git_pid)
+    assert orphans == 0
 
 
 def test_exit_while_another_thread_starts_git_kills_it(tmp_path: Path) -> None:
     """The exit cleanup waits for the starting thread too (p32)."""
-    code, git_pid = _run_child(CHILD_HEAD + SLOW_START, tmp_path)
+    code, orphans = _run_child(CHILD_HEAD + SLOW_START, tmp_path)
     assert code == 0
-    assert _gone(git_pid)
+    assert orphans == 0
 
 
 # SIGTERM's handler runs right after run_git blocked the signal: CPython runs a
@@ -323,9 +330,9 @@ gitdiff.run_git(["status"], pathlib.Path(sys.argv[2]), timeout=30)
 
 def test_sigterm_handled_inside_the_start_window_kills_git(tmp_path: Path) -> None:
     """Deferred while git starts, then run: no orphan (p30)."""
-    code, git_pid = _run_child(CHILD_HEAD + EARLY_HANDLER, tmp_path)
+    code, orphans = _run_child(CHILD_HEAD + EARLY_HANDLER, tmp_path)
     assert code == -signal.SIGTERM
-    assert _gone(git_pid)
+    assert orphans == 0
 
 
 def test_a_deferred_sigterm_runs_once_git_is_tracked(
