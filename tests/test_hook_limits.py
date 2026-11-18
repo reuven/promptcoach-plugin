@@ -16,7 +16,15 @@ from pathlib import Path
 
 import pytest
 
-from conftest import TOKEN, StubServer, prompt_payload, run_hook, stop_payload
+from conftest import (
+    COMMAND_PROMPTS,
+    ORDINARY_PROMPTS,
+    TOKEN,
+    StubServer,
+    prompt_payload,
+    run_hook,
+    stop_payload,
+)
 from promptcoach_client import claude_code, core, gitdiff
 from promptcoach_client.claude_code import PROFILE, main
 from promptcoach_client.contract import COMMAND_PATTERN, COMMAND_SYNONYMS
@@ -173,18 +181,7 @@ def test_snapshot_thread_errors_are_swallowed(
 # --- M7: block only a coach command; safe, short messages ----------------------------------
 
 
-@pytest.mark.parametrize(
-    "prompt",
-    [
-        "coach, quieter",
-        "Coach: status?",
-        "coach be louder please",
-        "  coach,   prompt-only on.  ",
-        "coach, that wasn\u2019t helpful",
-        "COACH learning off",
-        "coach, thanks!",
-    ],
-)
+@pytest.mark.parametrize("prompt", COMMAND_PROMPTS)
 def test_block_is_honored_for_a_coach_command(
     prompt: str, server: StubServer, env: dict[str, str], project: Path
 ) -> None:
@@ -193,18 +190,7 @@ def test_block_is_honored_for_a_coach_command(
     assert out == {"decision": "block", "reason": "Coach: quieter now."}
 
 
-@pytest.mark.parametrize(
-    "prompt",
-    [
-        "add a test",
-        "coach, helpful?",
-        "coach, that helped. Now add tests",
-        "coach, be helpful",
-        "coach, quieter\nand then fix the bug",
-        "coach, thank\u017f",
-        "coach, quieter" + " " * 1_000,  # a command is short; long prompts aren't read
-    ],
-)
+@pytest.mark.parametrize("prompt", ORDINARY_PROMPTS)
 def test_block_is_ignored_for_an_ordinary_prompt(
     prompt: str, server: StubServer, env: dict[str, str], project: Path
 ) -> None:

@@ -60,6 +60,28 @@ def _per_test_timeout() -> Iterator[None]:
 TOKEN = "pc_" + "t" * 43  # the server's token shape; a dummy
 SILENT = {"message": None, "block_prompt": False, "prompt_only": False}
 
+# Prompts the plugin reads as coach commands, and near misses it must not.
+# Shared by the block tests and the fail-closed tests, so the detector's
+# edge cases (spacing, case, curly apostrophes, length) are stated once.
+COMMAND_PROMPTS = [
+    "coach, quieter",
+    "Coach: status?",
+    "coach be louder please",
+    "  coach,   prompt-only on.  ",
+    "coach, that wasn\u2019t helpful",
+    "COACH learning off",
+    "coach, thanks!",
+]
+ORDINARY_PROMPTS = [
+    "add a test",
+    "coach, helpful?",
+    "coach, that helped. Now add tests",
+    "coach, be helpful",
+    "coach, quieter\nand then fix the bug",
+    "coach, thank\u017f",
+    "coach, quieter" + " " * 1_000,  # a command is short; long prompts aren't read
+]
+
 
 @dataclass
 class Received:
