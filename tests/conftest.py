@@ -22,6 +22,7 @@ from typing import Any
 import pytest
 from hypothesis import settings
 
+from promptcoach_client import gitdiff
 from promptcoach_client.claude_code import main
 
 # Hypothesis profiles: small for the red/green loop, large and derandomized on
@@ -158,9 +159,21 @@ def _hard_limit(request: pytest.FixtureRequest) -> Iterator[None]:
 def _sigterm_left_alone() -> Iterator[None]:
     """After each test, SIGTERM is unblocked in the main thread and its
     handler is the one the test found: a test that leaks either would make
-    the whole run deaf to CI's stop signal."""
+    the whole run deaf to CI's stop signal.
+
+    A hook run in-process installs its exit cleanup (a SIGTERM handler and an
+    atexit call) once per process, as it should in a real hook. In pytest
+    that leaked for the whole session, so every later SIGTERM, CI's stop
+    signal included, went through the hook's handler. It is undone here,
+    before the check, so only a leak of any other kind fails a test.
+    """
     before = signal.getsignal(signal.SIGTERM)
     yield
+    if gitdiff._CLEANUP_INSTALLED:
+        gitdiff._CLEANUP_INSTALLED.clear()
+        atexit.unregister(gitdiff._exit_cleanup)
+        previous = gitdiff._PREVIOUS_TERM
+        signal.signal(signal.SIGTERM, signal.SIG_DFL if previous is None else previous)
     if hasattr(signal, "pthread_sigmask"):
         blocked = signal.pthread_sigmask(signal.SIG_BLOCK, [])
         assert signal.SIGTERM not in blocked, "the test left SIGTERM blocked"
