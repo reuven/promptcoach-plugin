@@ -4,18 +4,44 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import signal
 import subprocess
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
 import pytest
+from hypothesis import settings
 
 from promptcoach_client.claude_code import main
+
+# Hypothesis profiles: small for the red/green loop, large and derandomized on
+# CI (the built-in ci profile, raised), tiny and derandomized under mutmut,
+# where every mutant reruns the tests.
+settings.register_profile("dev", max_examples=25)
+settings.register_profile("ci", settings.get_profile("ci"), max_examples=200)
+settings.register_profile("mutmut", max_examples=10, derandomize=True, deadline=None)
+
+
+def hypothesis_profile(env: Mapping[str, str], cwd: Path) -> str:
+    """Which profile to load: ``HYPOTHESIS_PROFILE`` if set, then mutmut (its
+    runs start in a ``mutants/`` copy), then ci when ``CI`` is set, then dev.
+
+    Why not just ``HYPOTHESIS_PROFILE`` with a dev default: that would replace
+    the profile Hypothesis picks on CI, quietly running 25 examples there.
+    """
+    if env.get("HYPOTHESIS_PROFILE"):
+        return env["HYPOTHESIS_PROFILE"]
+    if cwd.name == "mutants":
+        return "mutmut"
+    return "ci" if env.get("CI") else "dev"
+
+
+settings.load_profile(hypothesis_profile(os.environ, Path.cwd()))
 
 # No test may run longer than this. A test that blocks (a FIFO opened without
 # O_NONBLOCK, a pipe nobody closes) fails with a TimeoutError instead of

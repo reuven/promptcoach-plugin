@@ -153,11 +153,16 @@ coach command such as `coach, quieter`: the plugin checks that itself, and
 if the server asks to keep back a prompt that isn't a command, the prompt
 goes to Claude (the plugin fails open).
 
-A coach command fails the other way, closed. If the coach doesn't answer
-in time (the request times out, can't connect, gets a server error or a
-reply that isn't one), the command is kept from Claude anyway and you see
-"Coach: I didn't answer in time, so that command wasn't applied. Please
-send it again." Nothing changed, so send the command again. An ordinary
+A coach command fails the other way, closed: it never reaches Claude,
+whatever the coach replies. If the coach doesn't answer in time (the
+request times out, can't connect, gets a server error or a reply that
+isn't one) or is too busy to apply it, the command is kept from Claude
+anyway and you see "Coach: I didn't answer in time, so that command wasn't
+applied. Please send it again." Nothing changed, so send the command
+again. If the coach answers with a notice instead (sign in, or renew your
+membership), that notice is shown and the command is still kept from
+Claude. Before your token is set, a command is kept from Claude with a
+reminder to add it (`/plugin` → promptcoach → Configure). An ordinary
 prompt the coach doesn't answer in time just goes to Claude, with no
 coaching that turn. If Claude Code stops a hook at its limit, any git the
 hook started is stopped with it. A hook killed outright (`kill -9`) can't
@@ -179,7 +184,7 @@ uv run ruff check
 uv run mypy
 uv run mypy --python-version 3.10 tests
 uv run pytest
-uv run --isolated --no-project --python 3.9 --with 'pytest<9' --with pytest-cov pytest
+uv run --isolated --no-project --python 3.9 --with 'pytest<9' --with pytest-cov --with hypothesis pytest
 claude plugin validate ./plugins/promptcoach --strict
 claude plugin validate .
 ```

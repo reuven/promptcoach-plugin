@@ -7,6 +7,7 @@ import json
 import socket
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -464,7 +465,7 @@ LAPSED = (
     "Prompt coach: your LernerPython membership isn't active right now. "
     "Renew at https://lernerpython.com and coaching picks right back up."
 )
-NON_BLOCKING = {
+NON_BLOCKING: dict[str, dict[str, Any]] = {
     "quiet_pool_timeout": {"message": None, "block_prompt": False, "prompt_only": True},
     "rate_limited": {"message": None, "block_prompt": False, "prompt_only": False},
     "sign_in": {"message": SIGN_IN, "block_prompt": False, "prompt_only": True},

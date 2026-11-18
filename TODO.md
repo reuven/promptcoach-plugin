@@ -7,18 +7,12 @@
 - [x] A coach command the server doesn't answer (timeout, connection error,
       5xx, malformed or non-reply JSON, refused redirect) is blocked locally
       with "I didn't answer in time ... send it again", never sent to Claude.
-- [ ] Decide: a well-formed *non-blocking* reply to a command (the server's
-      quiet pool-timeout and rate-limit replies, and its not-signed-in and
-      lapsed messages) still passes the command to Claude. The server's
-      contract allows these replies for a command, so blocking them needs a
-      ruling on the reason text (the sign-in and lapsed messages must still
-      be shown).
-- [ ] Hypothesis is not a dev dependency, so the fail-closed rule has
-      example tests only; a property ("a command never gets a non-block
-      reply; an ordinary prompt never gets a local block") needs it added.
-
-Deferred from the v0.1.0 review rounds. The server scrubs everything again, so
-each of these is a gap in the client's first filter, not a leak past the coach.
+- [x] A well-formed non-blocking reply to a command is blocked too (ruling,
+      2026-11-18): with the server's message as the reason when it sends
+      one (sign-in, lapsed), else the "didn't answer" text. A command typed
+      with no token is blocked with a setup reminder.
+- [x] Hypothesis (dev only): a never-crash property for `before()` and a
+      no-echo property for the command block; dev/ci/mutmut profiles.
 
 ### Redaction (`redact`)
 

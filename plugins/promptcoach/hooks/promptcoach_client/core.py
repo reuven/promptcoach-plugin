@@ -20,8 +20,8 @@ Promises kept here, whatever the agent:
   credentials, and common token shapes redacted. The server scrubs again.
 - One deadline per hook: every git call and the request share it.
 - A block is honored only for a coach command ("coach, quieter"), and a
-  coach command fails closed: with no answer from the server it is blocked
-  here, never handed to the agent as a prompt.
+  coach command never reaches the agent, whatever the server replies (or
+  with no token at all): where the agent can block, it is blocked here.
 - Every string sent is valid UTF-8.
 """
 
@@ -82,10 +82,11 @@ _SURROGATE = re.compile("[\ud800-\udfff]")
 # C0 and C1 controls (and DEL), except newline and tab: no terminal escapes.
 _CONTROL = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 MAX_MESSAGE_BYTES = 4096
-# The block for a coach command the server didn't answer (timed out, refused,
-# 5xx, not a reply). The server applies a command only when it answers, and
-# then always with a block, so the command wasn't applied. Fixed text, in the
-# voice of the server's own ``COMMAND_RETRY``: nothing the person typed.
+# The block for a coach command the server didn't apply: no answer (timed out,
+# refused, 5xx, not a reply) or a quiet one (its pool or rate limit). The
+# server answers a command it applied with a block, so this one wasn't.
+# Fixed text, in the voice of the server's own ``COMMAND_RETRY``: nothing the
+# person typed.
 COMMAND_NOT_ANSWERED = (
     "Coach: I didn't answer in time, so that command wasn't applied. Please send it again."
 )
@@ -109,6 +110,9 @@ class AgentProfile:
     capabilities: Capabilities
     sources: SetupSources
     missing_token_message: str
+    # The block for a coach command typed before a token is set: says how
+    # to set one up in this agent. Fixed text, never the prompt.
+    command_without_token_message: str
 
     def __post_init__(self) -> None:
         """Refuse a profile the server would refuse (a 422 is silence)."""
@@ -119,8 +123,8 @@ class AgentProfile:
             raise ValueError("unknown project instruction file")
         if not set(sources.global_instruction_files) <= set(GLOBAL_INSTRUCTION_FILES):
             raise ValueError("unknown global instruction file")
-        if not self.missing_token_message:
-            raise ValueError("missing_token_message is required")
+        if not self.missing_token_message or not self.command_without_token_message:
+            raise ValueError("missing_token_message and command_without_token_message are required")
 
 
 @dataclass(frozen=True)
@@ -499,8 +503,10 @@ def before(
     person chose prompt-only mode); both end by the hook's deadline. A
     prompt the server blocks never reaches the agent, so its snapshot is
     dropped; the server may block only a coach command. A coach command
-    the server didn't answer is blocked here (``COMMAND_NOT_ANSWERED``),
-    where the agent can block: it wasn't applied, and as a prompt the agent
+    never reaches the agent (where it can block): one the server didn't
+    block is blocked here, with the server's message when it sent one (the
+    sign-in or lapsed text, so it isn't hidden), else ``COMMAND_NOT_ANSWERED``;
+    with no token, with the profile's setup message. As a prompt the agent
     would act on it. The reply is built before any state is saved, and
     saving is best effort; a local block saves no server setting.
     """
@@ -509,7 +515,10 @@ def before(
     store.sweep(time.time())
     if not _valid_ids(event.session_id, event.prompt_id):
         return None
+    command = profile.capabilities.can_block_prompt and is_coach_command(event.prompt)
     if not config.token:
+        if command:
+            return Reply(profile.command_without_token_message, True, True)
         if store.first_warning(event.session_id):
             return Reply(profile.missing_token_message, False, True)
         return None
@@ -547,8 +556,13 @@ def before(
         reply = Reply(reply.message, False, reply.prompt_only)
     if reply is not None:
         store.set_server_prompt_only(reply.prompt_only)
-    elif profile.capabilities.can_block_prompt and is_coach_command(event.prompt):
-        reply = Reply(COMMAND_NOT_ANSWERED, True, prompt_only)
+    if command and not (reply is not None and reply.block):
+        message = reply.message if reply is not None else None
+        reply = Reply(
+            message or COMMAND_NOT_ANSWERED,
+            True,
+            reply.prompt_only if reply is not None else prompt_only,
+        )
     if trees and not (reply is not None and reply.block):
         store.save_snapshot(event.session_id, event.prompt_id, trees[0])
     return reply

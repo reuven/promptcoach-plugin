@@ -44,6 +44,10 @@ PROFILE = core.AgentProfile(
         skills_dirs=(".claude/skills", ".agents/skills"),
     ),
     missing_token_message="Prompt coach: add your token with /plugin → promptcoach → Configure.",  # noqa: S106
+    command_without_token_message=(  # noqa: S106 - a message, not a secret
+        "Coach: that command wasn't applied, because the coach isn't set up yet. "
+        "Add your token with /plugin → promptcoach → Configure, then send it again."
+    ),
 )
 
 
