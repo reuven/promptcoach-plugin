@@ -1,0 +1,52 @@
+[project]
+name = "promptcoach-plugin"
+version = "0.1.0"
+description = "Claude Code plugin for the LernerPython prompt coach (hook code is stdlib only)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+dependencies = []
+
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = [
+    "mypy>=1.18,<2",
+    # pytest 9 needs 3.10; the 3.9 run uses the last pytest 8.
+    "pytest>=9.2.0; python_version >= '3.10'",
+    "pytest>=8.4,<9; python_version < '3.10'",
+    "pytest-cov>=7.0.0",
+    "ruff>=0.17.5",
+]
+
+[tool.pytest.ini_options]
+addopts = "--cov=promptcoach_client --cov=coach_hook --cov-branch --cov-report=term-missing --cov-fail-under=100 -p no:cacheprovider"
+pythonpath = ["plugins/promptcoach/hooks", "tests"]
+testpaths = ["tests"]
+filterwarnings = ["error"]
+
+[tool.mypy]
+# The hook code is checked as Python 3.9, its oldest supported version. The
+# tests import pytest, which needs 3.10+, so CI checks them in a second run:
+# `uv run mypy --python-version 3.10 tests`.
+files = ["plugins/promptcoach/hooks"]
+mypy_path = ["plugins/promptcoach/hooks", "tests"]
+explicit_package_bases = true
+python_version = "3.9"
+strict = true
+
+[tool.ruff]
+target-version = "py39"
+line-length = 100
+extend-exclude = ["*.md"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S", "SIM", "RUF", "BLE"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106", "S603", "S607", "S108"]
+"scripts/**" = ["S603", "S607"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["promptcoach_client", "coach_hook", "conftest", "server_contract"]

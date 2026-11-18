@@ -1,0 +1,30 @@
+{
+  "name": "promptcoach",
+  "displayName": "Prompt coach",
+  "version": "0.1.0",
+  "description": "Coaching on your prompts and on what the agent did, shown to you, never to Claude",
+  "author": {"name": "Reuven Lerner"},
+  "homepage": "https://coach.lernerpython.com",
+  "license": "MIT",
+  "userConfig": {
+    "token": {
+      "type": "string",
+      "title": "Coach token",
+      "description": "From coach.lernerpython.com/signin",
+      "sensitive": true,
+      "required": true
+    },
+    "server_url": {
+      "type": "string",
+      "title": "Coach server",
+      "description": "Leave as is unless Reuven asks you to change it",
+      "default": "https://coach.lernerpython.com"
+    },
+    "prompt_only": {
+      "type": "boolean",
+      "title": "Prompt-only mode",
+      "description": "Never send code or diffs",
+      "default": false
+    }
+  }
+}
