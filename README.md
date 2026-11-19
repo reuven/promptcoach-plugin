@@ -64,24 +64,21 @@ Everything goes over HTTPS to `coach.lernerpython.com`.
 
 ## Secrets
 
-- **Credential files are never sent.** That includes `.env`, private keys,
-  `credentials.json`, `.netrc` and cloud credentials.
-- **Common secrets are removed before anything leaves your machine.**
-  - API keys and tokens, such as `sk-...`, `ghp_...` and `AKIA...`, are
-    replaced with `[REDACTED]`.
-  - So are passwords, in URLs and in lines like `DB_PASSWORD=...`.
-  - Output is dropped entirely from commands that print secrets, such as
-    `cat .env`, `printenv` and `gh auth token`.
+- **Credential files are never sent:** `.env`, private keys, cloud
+  credentials and the like.
+- **Tokens and passwords become `[REDACTED]`** before anything leaves your
+  machine.
+- **Commands that print secrets** (`cat .env`, `printenv`) have their output
+  dropped.
 - **The server scrubs secrets again** before storing anything.
 
-This catches the usual cases, but it can't catch everything. So keep secrets
-out of your code and output, or use prompt-only mode.
+This catches the usual cases, not every case. Keep secrets out of your code
+and output, or use prompt-only mode.
 
-The plugin is careful with git too. It never changes your index, staging
-area or stash, and it never runs a repository's own hooks or filters.
+The plugin never changes your git index, staging area or stash, and never
+runs a repository's own hooks.
 
-[docs/details.md](docs/details.md) has more detail, for anyone who wants to
-check what's sent, filtered and run.
+For the full rules, see [docs/details.md](docs/details.md).
 
 ## Prompt-only mode
 
@@ -112,16 +109,14 @@ The full notice is shown when you sign in.
 
 The coach never holds up your session.
 
-- **An ordinary prompt:** if the coach doesn't answer in time, the prompt
-  goes to Claude, with no coaching that turn.
-- **A `coach, …` command:** if the coach doesn't answer in time, the command
-  is *not* passed to Claude. You'll see "Coach: I didn't answer in time, so
-  that command wasn't applied. Please send it again."
+- **An ordinary prompt** goes to Claude, with no coaching that turn.
+- **A `coach, …` command** is still kept from Claude. The coach tells you it
+  wasn't applied, so send it again.
 
 ## Versions
 
-The plugin and the coach server always share one version number, and are
-released together.
+The plugin and the coach server share one version number and are released
+together.
 
 ## License
 
@@ -129,18 +124,29 @@ MIT; see [LICENSE](LICENSE).
 
 ## Development
 
+Where the code lives, in `plugins/promptcoach/hooks/`:
+
+- `coach_hook.py`: the entry point;
+- `promptcoach_client/core.py` and its helpers: code shared by every agent;
+- `promptcoach_client/claude_code.py`: the Claude Code adapter.
+
+To run the checks:
+
 ```
 uv sync
+
+# Format, lint and types
 uv run ruff format --check
 uv run ruff check
 uv run mypy
 uv run mypy --python-version 3.10 tests
+
+# Tests, on your Python and on the oldest supported one (3.9)
 uv run pytest
-uv run --isolated --no-project --python 3.9 --with 'pytest<9' --with pytest-cov --with hypothesis pytest
+uv run --isolated --no-project --python 3.9 \
+  --with 'pytest<9' --with pytest-cov --with hypothesis pytest
+
+# The plugin and marketplace manifests
 claude plugin validate ./plugins/promptcoach --strict
 claude plugin validate .
 ```
-
-The hook code lives in `plugins/promptcoach/hooks/`: `coach_hook.py` is the
-entry point, `promptcoach_client/core.py` and its helpers are agent-neutral,
-and `promptcoach_client/claude_code.py` is the Claude Code adapter.
