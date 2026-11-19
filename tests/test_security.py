@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import StubServer, git, prompt_payload, run_hook, stop_payload
+from conftest import StubServer, git, prompt_payload, run_hook, shown, stop_payload
 from promptcoach_client import core
 from promptcoach_client.claude_code import PROFILE, emit
 from promptcoach_client.setup_scan import collect_setup
@@ -149,4 +149,4 @@ def test_a_trickling_server_cannot_stretch_the_deadline(
 def test_emit_never_blocks_where_blocking_is_not_allowed() -> None:
     out = io.StringIO()
     emit(core.Reply("x", True, False), out, allow_block=False)
-    assert json.loads(out.getvalue()) == {"systemMessage": "x"}
+    assert json.loads(out.getvalue()) == shown("x")

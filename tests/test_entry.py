@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 import coach_hook
-from conftest import StubServer, child_env, prompt_payload
+from conftest import StubServer, child_env, prompt_payload, shown
 
 HOOK = Path(__file__).resolve().parents[1] / "plugins" / "promptcoach" / "hooks" / "coach_hook.py"
 
@@ -33,7 +33,7 @@ def test_runs_as_a_script(server: StubServer, env: dict[str, str], project: Path
     )
 
     assert done.returncode == 0
-    assert json.loads(done.stdout) == {"systemMessage": "Hi."}
+    assert json.loads(done.stdout) == shown("Hi.")
     assert done.stderr == ""
 
 

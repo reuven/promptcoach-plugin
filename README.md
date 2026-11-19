@@ -38,7 +38,8 @@ To change your token or settings later: `/plugin` → promptcoach → Configure.
 
 Start a prompt with `coach,` to change a setting. These never reach Claude:
 
-- `coach, quieter` or `coach, louder`: less or more feedback
+- `coach, quieter` or `coach, louder`: less or more feedback, on the scale
+  off < quiet < normal < teach
 - `coach, off` or `coach, on`
 - `coach, status`
 - `coach, prompt-only on` or `coach, prompt-only off`

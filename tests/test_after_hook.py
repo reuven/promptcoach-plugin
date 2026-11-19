@@ -15,6 +15,7 @@ from conftest import (
     git,
     prompt_payload,
     run_hook,
+    shown,
     stop_payload,
 )
 from promptcoach_client import gitdiff
@@ -180,7 +181,7 @@ def test_after_sends_runs_and_clears_file(
 
     out = run_hook("after", stop_payload(repo), env)
 
-    assert json.loads(out) == {"systemMessage": "The tests ran. Nice."}
+    assert json.loads(out) == shown("The tests ran. Nice.")
     [req] = server.requests
     assert req.path == "/v1/after"
     assert req.body["tool_runs"] == [
@@ -210,7 +211,7 @@ def test_after_never_blocks_stop(
     _state(data_dir, prompt_only=False)
     server.reply = {"message": "odd", "block_prompt": True, "prompt_only": False}
 
-    assert json.loads(run_hook("after", stop_payload(repo), env)) == {"systemMessage": "odd"}
+    assert json.loads(run_hook("after", stop_payload(repo), env)) == shown("odd")
 
 
 def test_after_caps_runs_and_reply(

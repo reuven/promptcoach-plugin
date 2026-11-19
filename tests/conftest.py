@@ -24,7 +24,7 @@ from typing import Any
 import pytest
 from hypothesis import settings
 
-from promptcoach_client import gitdiff
+from promptcoach_client import claude_code, gitdiff
 from promptcoach_client.claude_code import main
 
 # Hypothesis profiles: small for the red/green loop, large and derandomized on
@@ -565,6 +565,28 @@ def run_hook(mode: str, payload: object, env: dict[str, str]) -> str:
     stdin = io.StringIO(payload if isinstance(payload, str) else json.dumps(payload))
     assert main([mode], stdin, stdout, env) == 0
     return stdout.getvalue()
+
+
+def blocked(reason: str) -> dict[str, object]:
+    """The hook output that keeps a prompt from Claude and shows ``reason``.
+
+    ``suppressOriginalPrompt`` leaves Claude Code's "Original prompt:" echo out
+    of the block message (checked to still block on 2.1.0, 2.1.142, 2.1.233
+    and 2.1.328; the older ones ignore the key).
+    """
+    return {
+        "decision": "block",
+        "reason": claude_code.frame(reason),
+        "hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "suppressOriginalPrompt": True,
+        },
+    }
+
+
+def shown(message: str) -> dict[str, object]:
+    """The hook output that shows ``message`` to the person, framed."""
+    return {"systemMessage": claude_code.frame(message)}
 
 
 def prompt_payload(project: Path, prompt: str = "add a test", **extra: object) -> dict[str, object]:

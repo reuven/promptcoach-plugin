@@ -138,6 +138,36 @@ def turn_ended(payload: Mapping[str, Any], env: Mapping[str, str]) -> core.TurnE
     )
 
 
+_RULE = "─" * 40
+_HEADER = "[Coach] " + _RULE[len("[Coach] ") :]
+
+
+def _drop_coach(line: str) -> str:
+    """The line without a leading "Coach: ", its first letter capitalized."""
+    if not line.startswith("Coach: "):
+        return line
+    rest = line[len("Coach: ") :]
+    return rest[:1].upper() + rest[1:]
+
+
+def frame(message: str) -> str:
+    """The message as Claude Code should show it: cleaned, under a header.
+
+    Claude Code puts its own label before a hook's message ("Stop says: "),
+    and "Stop says: Coach: ..." read as if Stop were the coach. So the
+    message goes between a ``[Coach]`` header and a rule, and the "Coach: "
+    that starts each of the server's lines is dropped, with the sentence
+    after it capitalized. The server's text stays agent-neutral; this
+    framing is Claude Code's alone. The framed message, rules included,
+    stays within the 4 KB cap.
+    """
+    lines = core.clean_message(message).split("\n")
+    body = "\n".join(_drop_coach(line) for line in lines)
+    room = core.MAX_MESSAGE_BYTES - len(f"{_HEADER}\n\n{_RULE}".encode())
+    body = body.encode("utf-8")[:room].decode("utf-8", errors="ignore")
+    return f"{_HEADER}\n{body}\n{_RULE}"
+
+
 def emit(reply: core.Reply | None, stdout: TextIO, *, allow_block: bool) -> None:
     """Write the reply as Claude Code hook output, or nothing at all.
 
@@ -147,12 +177,25 @@ def emit(reply: core.Reply | None, stdout: TextIO, *, allow_block: bool) -> None
     ``Stop`` would make Claude keep going, so it is never allowed there.
     The message loses control characters (no terminal escapes) and is
     capped at 4 KB.
+
+    A block also sets ``suppressOriginalPrompt``, so Claude Code's block
+    message doesn't end with "Original prompt:" and the command echoed back.
+    Claude Code versions that predate the key ignore it and still block
+    (checked on 2.1.0, 2.1.142, 2.1.233 and 2.1.328).
     """
     if reply is None or reply.message is None:
         return
-    message = core.clean_message(reply.message)
+    message = frame(reply.message)
+    out: dict[str, object]
     if reply.block and allow_block:
-        out = {"decision": "block", "reason": message}
+        out = {
+            "decision": "block",
+            "reason": message,
+            "hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "suppressOriginalPrompt": True,
+            },
+        }
     else:
         out = {"systemMessage": message}
     stdout.write(json.dumps(out))
