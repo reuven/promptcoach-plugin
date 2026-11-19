@@ -10,6 +10,13 @@ thread has parked, waiting forever on a lock with every signal blocked, so
 none of them runs Python again; and a git that finishes starting after the
 cleanup is killed at once.
 
+1.0.0b7: that wasn't the whole story. CI kept crashing, and a loaded Mac
+reproduced it (18 of 45 runs under background priority and full CPU). The
+crash reports show the main thread in Py_FinalizeEx and the faulting thread
+in t_bootstrap: a thread *born* during finalization. A git start that outlasts
+the cleanup's 0.3 s wait resumes then, and run_git, after killing that git,
+still started its reader thread. Now it starts none (0 of 60 runs crashed).
+
 The child tests force the interleaving: an atexit handler registered before
 the cleanup (so it runs after it) holds the interpreter open for a while; a
 thread that returns from run_git in that time is a thread that ran Python
@@ -205,6 +212,122 @@ def test_a_start_that_ends_after_the_exit_cleanup_kills_its_git_and_parks(
             proc.kill()
     _resume(thread)
     assert returned == [None]
+
+
+def test_a_start_that_ends_after_the_exit_cleanup_starts_no_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """1.0.0b7: the root cause of the macOS 3.9 SIGSEGV. A git start that
+    outlasts the cleanup's wait resumes while the interpreter finalizes; run_git
+    killed that git but then started its reader thread, and on CPython 3.9 a
+    thread born during Py_FinalizeEx crashes in its bootstrap (t_bootstrap,
+    seen in the crash reports). Once the exit has begun, no thread may start."""
+    _waiting_git(monkeypatch)
+    monkeypatch.setattr(gitdiff, "_EXIT_WAIT_S", 0.05)
+    current = subprocess.Popen
+    procs: list[subprocess.Popen[bytes]] = []
+    in_start, cleaned = threading.Event(), threading.Event()
+
+    def slow_popen(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+        in_start.set()
+        cleaned.wait(10)
+        proc = current(*args, **kwargs)  # type: ignore[call-overload]
+        procs.append(proc)
+        return proc  # type: ignore[no-any-return]
+
+    monkeypatch.setattr(subprocess, "Popen", slow_popen)
+    returned: list[object] = []
+    thread = threading.Thread(
+        target=lambda: returned.append(gitdiff.run_git(["status"], tmp_path, timeout=30)),
+        daemon=True,
+    )
+    thread.start()
+    born: list[str] = []
+    real_start = threading.Thread.start
+
+    def start(self: threading.Thread) -> None:
+        born.append(self.name)
+        real_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", start)
+    try:
+        assert in_start.wait(10)
+        gitdiff._exit_cleanup()
+        cleaned.set()
+        deadline = time.monotonic() + 10
+        while not procs:
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        assert procs[0].wait(5) is not None
+        thread.join(0.5)
+        assert born == []  # before the fix: the reader, started during the exit
+        assert returned == []
+        assert thread.is_alive()  # parked
+    finally:
+        cleaned.set()
+        for proc in procs:
+            proc.kill()
+        monkeypatch.undo()
+    _resume(thread)
+    assert returned == [None]
+
+
+# The start outlasts the cleanup's 0.3 s wait for certain (CI's slow runners did
+# it by chance), and an atexit handler that runs after the cleanup reports any
+# thread started from then on: before the fix, the reader.
+BORN_LATE = """
+real_start = threading.Thread.start
+born_late = []
+def spy(self):
+    if gitdiff._EXITING.is_set():
+        born_late.append(self.name)
+    real_start(self)
+threading.Thread.start = spy
+def report():
+    time.sleep(1.0)
+    print("born-late" if born_late else "none-born", flush=True)
+atexit.register(report)
+gitdiff.install_cleanup()
+real = subprocess.Popen
+started = threading.Event()
+class SlowPopen(real):
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        started.set()
+        time.sleep(0.6)
+gitdiff.subprocess.Popen = SlowPopen
+threading.Thread(target=gitdiff.run_git, args=(["status"], pathlib.Path(sys.argv[2])),
+                 kwargs={"timeout": 30}, daemon=True).start()
+started.wait(10)
+"""
+
+
+@posix_only(
+    "test_exit_park.py::test_a_start_that_ends_after_the_exit_cleanup_starts_no_thread",
+    "a sh git found by pgrep",
+)
+def test_a_start_past_the_cleanups_wait_starts_no_thread_at_exit(tmp_path: Path) -> None:
+    seconds = f"30.{os.getpid()}{time.monotonic_ns() % 10**6}"
+    fake, pid_file = _fake_git(tmp_path, seconds)
+    script = (
+        "import atexit, os, pathlib, subprocess, sys, threading, time\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "from promptcoach_client import gitdiff\n" + BORN_LATE
+    )
+    child = subprocess.run(
+        [sys.executable, "-I", "-c", script, str(HOOK.parent), str(tmp_path), str(pid_file)],
+        env=child_env(path=f"{fake}{os.pathsep}{os.environ['PATH']}"),
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    time.sleep(0.3)
+    pattern = f"sleep {seconds}"
+    left = subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True, check=False)
+    subprocess.run(["pkill", "-9", "-f", pattern], check=False)
+    assert (child.returncode, child.stdout.split(), child.stderr) == (0, ["none-born"], "")
+    assert left.stdout.split() == []
 
 
 @posix_only(
