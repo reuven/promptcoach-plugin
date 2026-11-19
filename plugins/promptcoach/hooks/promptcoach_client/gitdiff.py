@@ -589,7 +589,7 @@ def _run_git(
 
 
 def _forget(proc: subprocess.Popen[bytes]) -> None:
-    """Stop tracking a finished or killed git: out of _LIVE, its job closed."""
+    """Forget a finished or killed git: out of _LIVE, its job closed."""
     _LIVE.discard(proc.pid)
     job = _JOB_OF.pop(proc.pid, None)
     if job is not None:
