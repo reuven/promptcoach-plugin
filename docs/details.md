@@ -1,165 +1,144 @@
 # Prompt coach: the details
 
-The [README](../README.md) gives the short version. This page has every case,
-for anyone who wants to check exactly what the plugin sends, filters and
-runs.
+The [README](../README.md) gives the short version. This page is for anyone who
+wants to check what the plugin sends, filters and runs.
 
 ## What is sent
 
-Each prompt sends, over HTTPS, to `coach.lernerpython.com`:
+Everything goes over HTTPS to `coach.lernerpython.com`.
+
+**With each prompt:**
 
 - the prompt you typed;
-- your project's instructions files (`CLAUDE.md`, `AGENTS.md`, `SYSTEM.md`,
-  `.claude/CLAUDE.md`) and your global ones (`~/.claude/CLAUDE.md`,
-  `~/.codex/AGENTS.md`, `~/.pi/agent/AGENTS.md`), up to 20,000 characters each;
-- facts about the setup, with no code: whether `.gitignore` covers `.env` and
-  data files, the test command, whether there's a tests directory, CI or
-  pre-commit, which linters are configured, which hook events you use and
-  which known tools (such as `ruff` or `pytest`) those hooks run (never the
-  hook commands themselves), skill names, and which data libraries the
-  project depends on (names only).
+- your instructions files, up to 20,000 characters each:
+  - project: `CLAUDE.md`, `AGENTS.md`, `SYSTEM.md`, `.claude/CLAUDE.md`;
+  - global: `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, `~/.pi/agent/AGENTS.md`;
+- facts about your setup, with no code. Examples: whether `.gitignore` covers
+  `.env`, the test command, whether there's CI, which linters are configured,
+  and which known tools your hooks run (never the hook commands themselves).
 
-When Claude finishes a turn, it sends:
+**When Claude finishes a turn:**
 
-- the diff of what changed during that turn only (a snapshot is taken before
-  the turn, so earlier changes and your own edits aren't included);
-- the shell commands Claude ran (filtered for secrets, see below), their
-  exit codes and the last 4,000 characters of their output;
+- the diff of that turn only. A snapshot is taken before the turn, so earlier
+  changes and your own edits aren't included;
+- the shell commands Claude ran, with their exit codes and the last 4,000
+  characters of their output;
 - Claude's final reply.
 
-Credential files (`.env` files, `.envrc`, private keys, `*.pem`,
-`credentials.json`, `.netrc`, `.pypirc`, `.npmrc`, cloud credentials and
-similar files) are left out of every snapshot and diff on your machine, and
-the server refuses them too.
+## Secrets
 
-Secrets can still turn up elsewhere: in a command's output, in Claude's
-reply, or pasted into a source file. The plugin filters the common ones
-before anything leaves your machine. A command that reads a credential file
-(`cat .env`, `source .env`, `< .env`, or a pattern such as `.env*` that could
-match one), expands a secret-named variable (`echo $OPENAI_API_KEY`), prints
-the environment (`env`, `printenv`, `export -p`, `os.environ`, an inline
-`python -c`, `node -p` or `perl -e` script that reads it or names a secret
-in quotes) or asks a tool for a
-secret (`gh auth token`, `kubectl get secret`, `docker compose config`,
-`aws configure get`, `vault read`) has its output dropped. Well-known token shapes (`sk-...`, `ghp_...`,
-`AKIA...`, `sk_live_...`, `hf_...`, JWTs, `Authorization:` headers, the
-password in `https://user:password@host`, `--password VALUE` (and
-`--db-password`, `--client-secret`...), `mysql -pVALUE`, `sshpass -p`,
-`curl -u user:pass`, `<password>...</password>`, a string compared with a
-secret's name (`password != "..."`, `"..." == password`),
-private-key blocks and the like)
-and the values of lines such as `DB_PASSWORD=...` or `api_key: ...` are
-replaced with `[REDACTED]` in commands, output, replies and diffs. Only a few
-plain code forms are left alone: a token count (`max_tokens=1024`), a name
-assigned to itself (`self.api_key = api_key`), a call or lookup
-(`password = get_password()`, `os.environ["TOKEN"]`) and a comparison with a
-dotted name (`token.start == token.end`); an `UPPER_CASE` name
-always loses its value. The server scrubs secrets again from everything it stores. This is a
-filter for the usual cases, not a guarantee: a secret in an unusual shape, or
-a command that hides what it reads (`eval`, a file name built from pieces or
-held in a variable), can get through, so keep secrets out of code and
-output, or use prompt-only mode.
+**Credential files are never sent.** `.env` files, private keys, `*.pem`,
+`credentials.json`, `.netrc`, cloud credentials and the like are left out of
+every snapshot and diff on your machine. The server refuses them too.
 
-The snapshots are made with a private git index file, so your own index,
-staging area and stash are never touched. Making one does write git objects
-(the blobs and trees of your work tree) into the repository's
-`.git/objects`; nothing refers to them, and `git gc` removes them in time.
-The plugin never runs programs a repository's own git config names (an
-fsmonitor hook, hooks, diff drivers), never fetches (a partial clone's
-missing objects stay missing), and shows a submodule only as a commit line,
-never its files. A repository whose own config defines a clean/smudge filter
-gets no diff at all, and so does one whose `.git` points somewhere else (a
-`gitdir:` file, `core.worktree`, a `commondir` file, `alternates`, or a
-`.git` that is, or contains, a symlink anywhere), unless it is a linked
-worktree that its main repository lists. (Symlinks in `.git/hooks` are
-fine: the plugin never runs hooks.) A `.git` that holds a FIFO or other
-special file, or is too big to check quickly (over 100,000 entries), gets no
-diff either. The diff covers only your project's own directory: if the
-project sits inside a bigger repository (a monorepo, say), the rest of that
-repository is left out, and a repository whose top is your home directory, or
-above it (a dotfiles repository), gets no diff at all.
+**Secrets elsewhere are filtered** before anything leaves your machine:
 
-These checks protect against a repository that was handed to you, not
-against a program already running as you: something that can change `.git`
-between the plugin's check and git's read could already read your files
-directly.
+- A command that reads a credential file (`cat .env`), prints the environment
+  (`env`, `printenv`) or asks a tool for a secret (`gh auth token`) has its
+  output dropped.
+- Well-known token shapes (`sk-...`, `ghp_...`, `AKIA...`, JWTs,
+  `Authorization:` headers, passwords in URLs or on command lines) become
+  `[REDACTED]` in commands, output, replies and diffs.
+- So do values on lines like `DB_PASSWORD=...` or `api_key: ...`. Plain code
+  such as `password = get_password()` is left alone.
+- The server scrubs secrets again from everything it stores.
 
-Files are read only where they are: a `CLAUDE.md` or `.claude/` that is
-a symlink out of the project (or out of your home directory, for the global
-files), or to a credential file, is treated as absent.
+This is a filter for the usual cases, not a guarantee. A secret in an unusual
+shape, or a command that hides what it reads (`eval`, a file name held in a
+variable), can get through. Keep secrets out of code and output, or use
+prompt-only mode.
+
+## How the diff is made
+
+The plugin snapshots your work tree with its own private git index file.
+
+- Your index, staging area and stash are never touched.
+- A snapshot writes unreferenced objects into `.git/objects`; `git gc`
+  removes them in time.
+- The plugin never runs programs named by the repository's git config
+  (hooks, fsmonitor, diff drivers) and never fetches.
+- A submodule shows up only as a commit line, never its files.
+- Only your project's directory is covered. In a monorepo, the rest of the
+  repository is left out.
+
+Some repositories get no diff at all:
+
+- one whose config defines a clean/smudge filter;
+- one whose `.git` points somewhere else or contains a symlink (a linked
+  worktree its main repository lists is fine);
+- one whose `.git` holds a special file or has more than 100,000 entries;
+- one whose top is your home directory or above it, such as a dotfiles
+  repository.
+
+These checks protect you from a repository someone handed you. They can't
+protect you from a program already running as you, which could read your
+files directly anyway.
+
+Files are read only where they are. An instructions file or `.claude/` that is
+a symlink out of the project, or to a credential file, counts as absent.
 
 ## Prompt-only mode
 
 For code you may not send anywhere (your employer's, say), turn on
-prompt-only mode, either in the plugin (`/plugin` → promptcoach → Configure →
-Prompt-only mode) or on your settings page at
-<https://coach.lernerpython.com/settings>. Either one is enough. In
-prompt-only mode:
+prompt-only mode in either place:
 
-- no diffs, no command output and no Claude reply are sent;
-- commands are reduced to an outline: the program, its known subcommands,
-  option names without their values, and file paths (a word with a `/`, or
-  ending in a common extension such as `.py`, `.toml` or `.csv`)
-  (`uv run pytest tests/x.py -k slow` is sent as `uv run pytest tests/x.py -k`,
-  `python -c '...'` as `python -c`, `mysql -p secret` as `mysql`);
-- your prompts, your instructions files and the setup facts above are still
-  sent.
+- in the plugin: `/plugin` → promptcoach → Configure → Prompt-only mode;
+- on your settings page: <https://coach.lernerpython.com/settings>.
 
-Until the plugin has heard from the server once, it behaves as if
-prompt-only mode were on.
+In prompt-only mode:
+
+- no diffs, command output or Claude replies are sent;
+- commands are cut to an outline: the program, its subcommands, option names
+  without values, and file paths. `uv run pytest tests/x.py -k slow` is sent
+  as `uv run pytest tests/x.py -k`;
+- your prompts, instructions files and setup facts are still sent.
+
+Until the plugin has heard from the server once, it acts as if prompt-only
+mode were on.
 
 ## Privacy
 
-Only you and I (Reuven) can see your history. To write feedback, the coach sends your
-prompts, and your code unless prompt-only mode is on, to Anthropic's API. You
-can opt out of cross-subscriber learning, or delete everything, at any time
-from <https://coach.lernerpython.com/settings>. The full notice is shown when
-you sign in at <https://coach.lernerpython.com/signin>.
+- Only you and I (Reuven) can see your history.
+- To write feedback, the coach sends your prompts to Anthropic's API, and
+  your code too unless prompt-only mode is on.
+- You can opt out of cross-subscriber learning, or delete everything, at
+  <https://coach.lernerpython.com/settings>.
+- The full notice is shown when you sign in at
+  <https://coach.lernerpython.com/signin>.
 
 ## Time limits
 
-Each hook has one time budget for all its work: 2.5 seconds before a prompt
-(counted from the moment Python starts) and 13.5 seconds at the end of a
-turn. Claude Code's own limits (5 and 20 seconds) leave room for the shell
-and Python to start, which takes longer on Windows. A
-slow git or a slow server means less coaching for that turn, never a stuck
-session. The server can keep a prompt from Claude only when the prompt is a
-coach command such as `coach, quieter`: the plugin checks that itself, and
-if the server asks to keep back a prompt that isn't a command, the prompt
-goes to Claude (the plugin fails open).
+Each hook has a fixed time budget for all its work:
 
-A coach command fails the other way, closed: it never reaches Claude,
-whatever the coach replies. If the coach doesn't answer in time (the
-request times out, can't connect, gets a server error or a reply that
-isn't one) or is too busy to apply it, the command is kept from Claude
-anyway and you see "Coach: I didn't answer in time, so that command wasn't
-applied. Please send it again." Nothing changed, so send the command
-again. If the coach answers with a notice instead (sign in, or renew your
-membership), that notice is shown and the command is still kept from
-Claude. Before your token is set, a command is kept from Claude with a
-reminder to add it (`/plugin` → promptcoach → Configure). An ordinary
-prompt the coach doesn't answer in time just goes to Claude, with no
-coaching that turn. If Claude Code stops a hook at its limit, any git the
-hook started is stopped with it. A hook killed outright (`kill -9`) can't
-clean up: a git it started then runs to its end, which takes about as long
-as `git add -A` on your project (or until something stops it: it still obeys
-SIGTERM); it writes only the plugin's own private index file and
-unreferenced objects in `.git/objects`.
+- 2.5 seconds before a prompt;
+- 13.5 seconds at the end of a turn.
+
+Claude Code's own limits (5 and 20 seconds) leave room for the shell and
+Python to start. A slow git or a slow server means less coaching that turn,
+never a stuck session.
+
+**Ordinary prompts fail open.** If the coach doesn't answer in time, the
+prompt goes to Claude with no coaching that turn. The coach can never keep an
+ordinary prompt from Claude.
+
+**Coach commands fail closed.** A command such as `coach, quieter` never
+reaches Claude, whatever happens:
+
+- if the coach doesn't answer in time, you see "Coach: I didn't answer in
+  time, so that command wasn't applied. Please send it again.";
+- if the coach answers with a notice (sign in, renew your membership), you
+  see that notice;
+- before your token is set, you see a reminder to add it.
+
+If Claude Code stops a hook at its limit, any git the hook started stops with
+it. A hook killed outright (`kill -9`) can't clean up, so its git runs to the
+end. That takes about as long as `git add -A` on your project, and writes
+only the plugin's private index and unreferenced objects.
 
 ## Versions
 
-The plugin's version is the coach server's version: they are released
-together, and every request names it (`X-Promptcoach-Plugin`). One test
-keeps `plugin.json`, `pyproject.toml` and the package's `__version__` the
-same.
-
-Versions are a strict subset of PEP 440, the server's own pattern: two to
-four release numbers, an optional `a`, `b` or `rc` pre-release and an
-optional `.devN` (so `1.0.0b1` is a version), at most 32 characters. The
-plugin only checks the pattern; the server orders versions, by PEP 440.
-
-**Release order: deploy the server first, then publish the plugin.** A
-plugin whose version the running server doesn't accept yet (a new pattern,
-a newer version than its minimum allows) gets a 422 on every request, so
-no coaching, until the server catches up.
-
+- The plugin and the coach server share one version and are released
+  together. Every request names the plugin's version.
+- Versions follow a strict subset of PEP 440, such as `1.0.0` or `1.0.0b1`.
+- **The server is deployed first, then the plugin.** Until the server
+  accepts a new plugin version, that plugin gets no coaching.

@@ -80,8 +80,8 @@ out of your code and output, or use prompt-only mode.
 The plugin is careful with git too. It never changes your index, staging
 area or stash, and it never runs a repository's own hooks or filters.
 
-[docs/details.md](docs/details.md) has every case, for anyone who wants to
-check exactly what's sent, filtered and run.
+[docs/details.md](docs/details.md) has more detail, for anyone who wants to
+check what's sent, filtered and run.
 
 ## Prompt-only mode
 
