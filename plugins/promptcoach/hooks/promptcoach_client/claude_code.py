@@ -142,18 +142,27 @@ _RULE = "─" * 40
 _HEADER = "[Coach] " + _RULE[len("[Coach] ") :]
 
 
+def _drop_coach(line: str) -> str:
+    """The line without a leading "Coach: ", its first letter capitalized."""
+    if not line.startswith("Coach: "):
+        return line
+    rest = line[len("Coach: ") :]
+    return rest[:1].upper() + rest[1:]
+
+
 def frame(message: str) -> str:
     """The message as Claude Code should show it: cleaned, under a header.
 
     Claude Code puts its own label before a hook's message ("Stop says: "),
     and "Stop says: Coach: ..." read as if Stop were the coach. So the
     message goes between a ``[Coach]`` header and a rule, and the "Coach: "
-    that starts each of the server's lines is dropped. The server's text
-    stays agent-neutral; this framing is Claude Code's alone. The framed
-    message, rules included, stays within the 4 KB cap.
+    that starts each of the server's lines is dropped, with the sentence
+    after it capitalized. The server's text stays agent-neutral; this
+    framing is Claude Code's alone. The framed message, rules included,
+    stays within the 4 KB cap.
     """
     lines = core.clean_message(message).split("\n")
-    body = "\n".join(line.removeprefix("Coach: ") for line in lines)
+    body = "\n".join(_drop_coach(line) for line in lines)
     room = core.MAX_MESSAGE_BYTES - len(f"{_HEADER}\n\n{_RULE}".encode())
     body = body.encode("utf-8")[:room].decode("utf-8", errors="ignore")
     return f"{_HEADER}\n{body}\n{_RULE}"

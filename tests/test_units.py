@@ -237,29 +237,35 @@ BOTTOM = "─" * 40
 def test_frame_sets_the_coach_off_from_claude_codes_label() -> None:
     """Claude Code shows "Stop says: " before a hook's message; "Stop says:
     Coach: ..." was confusing, so the message gets a header and a rule."""
-    assert claude_code.frame("Coach: add a test.") == f"{TOP}\nadd a test.\n{BOTTOM}"
+    assert claude_code.frame("Coach: add a test.") == f"{TOP}\nAdd a test.\n{BOTTOM}"
 
 
 def test_frame_drops_coach_at_the_start_of_every_line_only() -> None:
     message = "A sharper version: x\nCoach: one.\n  Why: Coach: stays.\nCoach: two."
     assert claude_code.frame(message) == (
-        f"{TOP}\nA sharper version: x\none.\n  Why: Coach: stays.\ntwo.\n{BOTTOM}"
+        f"{TOP}\nA sharper version: x\nOne.\n  Why: Coach: stays.\nTwo.\n{BOTTOM}"
+    )
+
+
+def test_frame_capitalizes_only_where_it_dropped_coach() -> None:
+    assert claude_code.frame("Coach: été.\nlower stays.\nCoach: ") == (
+        f"{TOP}\nÉté.\nlower stays.\n\n{BOTTOM}"
     )
 
 
 def test_frame_keeps_the_whole_message_within_4_kb() -> None:
     framed = claude_code.frame("Coach: " + "é" * 5_000)
     assert len(framed.encode()) <= core.MAX_MESSAGE_BYTES
-    assert framed.startswith(f"{TOP}\né") and framed.endswith(f"\n{BOTTOM}")
+    assert framed.startswith(f"{TOP}\nÉ") and framed.endswith(f"\n{BOTTOM}")
 
 
 def test_emit_frames_both_shown_and_blocking_messages() -> None:
     out = io.StringIO()
     emit(core.Reply("Coach: hi.", False, False), out, allow_block=True)
-    assert json.loads(out.getvalue()) == {"systemMessage": f"{TOP}\nhi.\n{BOTTOM}"}
+    assert json.loads(out.getvalue()) == {"systemMessage": f"{TOP}\nHi.\n{BOTTOM}"}
     out = io.StringIO()
     emit(core.Reply("Coach: hi.", True, False), out, allow_block=True)
-    assert json.loads(out.getvalue())["reason"] == f"{TOP}\nhi.\n{BOTTOM}"
+    assert json.loads(out.getvalue())["reason"] == f"{TOP}\nHi.\n{BOTTOM}"
 
 
 def test_emit_writes_nothing_for_silence() -> None:
