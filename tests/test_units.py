@@ -13,8 +13,8 @@ from typing import Any
 
 import pytest
 
-from conftest import StubServer, git, posix_only, prompt_payload, run_hook
-from promptcoach_client import core, gitdiff, setup_scan
+from conftest import StubServer, git, posix_only, prompt_payload, run_hook, shown
+from promptcoach_client import claude_code, core, gitdiff, setup_scan
 from promptcoach_client.claude_code import PROFILE, config_from_env, emit, main, tool_ran
 from promptcoach_client.setup_scan import SetupSources, collect_setup, tools_in
 
@@ -186,7 +186,7 @@ def test_before_without_data_dir_still_coaches(
 ) -> None:
     del env["CLAUDE_PLUGIN_DATA"]
     server.reply = {"message": "ok", "block_prompt": False, "prompt_only": False}
-    assert json.loads(run_hook("before", prompt_payload(project), env)) == {"systemMessage": "ok"}
+    assert json.loads(run_hook("before", prompt_payload(project), env)) == shown("ok")
     # Unknown setting: the setup is sent as prompt-only mode sends it.
     assert server.requests[0].body["setup"]["test_command"] is None
 
@@ -228,6 +228,38 @@ def test_tool_ran_ignores_non_string_prompt_id() -> None:
         }
     )
     assert run is not None and run.prompt_id is None and run.output == "" and run.exit_code == 0
+
+
+TOP = "[Coach] " + "─" * 32
+BOTTOM = "─" * 40
+
+
+def test_frame_sets_the_coach_off_from_claude_codes_label() -> None:
+    """Claude Code shows "Stop says: " before a hook's message; "Stop says:
+    Coach: ..." was confusing, so the message gets a header and a rule."""
+    assert claude_code.frame("Coach: add a test.") == f"{TOP}\nadd a test.\n{BOTTOM}"
+
+
+def test_frame_drops_coach_at_the_start_of_every_line_only() -> None:
+    message = "A sharper version: x\nCoach: one.\n  Why: Coach: stays.\nCoach: two."
+    assert claude_code.frame(message) == (
+        f"{TOP}\nA sharper version: x\none.\n  Why: Coach: stays.\ntwo.\n{BOTTOM}"
+    )
+
+
+def test_frame_keeps_the_whole_message_within_4_kb() -> None:
+    framed = claude_code.frame("Coach: " + "é" * 5_000)
+    assert len(framed.encode()) <= core.MAX_MESSAGE_BYTES
+    assert framed.startswith(f"{TOP}\né") and framed.endswith(f"\n{BOTTOM}")
+
+
+def test_emit_frames_both_shown_and_blocking_messages() -> None:
+    out = io.StringIO()
+    emit(core.Reply("Coach: hi.", False, False), out, allow_block=True)
+    assert json.loads(out.getvalue()) == {"systemMessage": f"{TOP}\nhi.\n{BOTTOM}"}
+    out = io.StringIO()
+    emit(core.Reply("Coach: hi.", True, False), out, allow_block=True)
+    assert json.loads(out.getvalue())["reason"] == f"{TOP}\nhi.\n{BOTTOM}"
 
 
 def test_emit_writes_nothing_for_silence() -> None:

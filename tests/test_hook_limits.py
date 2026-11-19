@@ -28,6 +28,7 @@ from conftest import (
     prompt_payload,
     run_child_pytest,
     run_hook,
+    shown,
     stop_payload,
 )
 from promptcoach_client import claude_code, core, gitdiff
@@ -144,7 +145,7 @@ def test_read_only_data_dir_still_blocks(
         data_dir.chmod(0o755)
 
     assert json.loads(out) == blocked("Coach: quieter now.")
-    assert json.loads(after) == {"systemMessage": "Coach: quieter now."}
+    assert json.loads(after) == shown("Coach: quieter now.")
 
 
 # --- M6: worker threads never print -------------------------------------------------------
@@ -183,7 +184,7 @@ def test_snapshot_thread_errors_are_swallowed(
     monkeypatch.setattr(gitdiff, "snapshot", broken)
     server.reply = {"message": "Hi.", "block_prompt": False, "prompt_only": False}
 
-    assert json.loads(run_hook("before", prompt_payload(repo), env)) == {"systemMessage": "Hi."}
+    assert json.loads(run_hook("before", prompt_payload(repo), env)) == shown("Hi.")
 
 
 # --- M7: block only a coach command; safe, short messages ----------------------------------
@@ -204,7 +205,7 @@ def test_block_is_ignored_for_an_ordinary_prompt(
 ) -> None:
     server.reply = BLOCK
     out = json.loads(run_hook("before", prompt_payload(project, prompt=prompt), env))
-    assert out == {"systemMessage": "Coach: quieter now."}
+    assert out == shown("Coach: quieter now.")
 
 
 def test_command_pattern_matches_the_server() -> None:
@@ -225,7 +226,9 @@ def test_messages_lose_control_characters_and_are_capped(
 
     message = json.loads(run_hook("before", prompt_payload(project), env))["systemMessage"]
 
-    assert message.startswith("]8;;https://evil.exampleclick]8;; [2J[31mRED31m line\n\ttab")
+    assert message.split("\n", 1)[1].startswith(
+        "]8;;https://evil.exampleclick]8;; [2J[31mRED31m line\n\ttab"
+    )
     assert not any((ord(c) < 32 and c not in "\n\t") or 127 <= ord(c) < 160 for c in message)
     assert len(message.encode()) <= 4096
 
@@ -249,9 +252,7 @@ def test_after_never_returns_a_block(
     reply = core.after(event, config, PROFILE)
 
     assert reply == core.Reply("Coach: quieter now.", False, False)
-    assert json.loads(run_hook("after", stop_payload(project), env)) == {
-        "systemMessage": "Coach: quieter now."
-    }
+    assert json.loads(run_hook("after", stop_payload(project), env)) == shown("Coach: quieter now.")
 
 
 def test_stdin_read_is_bounded(
@@ -290,7 +291,7 @@ def test_adapter_never_blocks_at_the_end_of_a_turn(
 ) -> None:
     """Even if the core returned a block, Stop output is only a message."""
     monkeypatch.setattr(core, "after", lambda *args: core.Reply("x", True, False))
-    assert json.loads(run_hook("after", stop_payload(project), env)) == {"systemMessage": "x"}
+    assert json.loads(run_hook("after", stop_payload(project), env)) == shown("x")
 
 
 # --- a test that hangs in a blocking call ends the run, naming itself ---------------------

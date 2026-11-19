@@ -138,6 +138,27 @@ def turn_ended(payload: Mapping[str, Any], env: Mapping[str, str]) -> core.TurnE
     )
 
 
+_RULE = "─" * 40
+_HEADER = "[Coach] " + _RULE[len("[Coach] ") :]
+
+
+def frame(message: str) -> str:
+    """The message as Claude Code should show it: cleaned, under a header.
+
+    Claude Code puts its own label before a hook's message ("Stop says: "),
+    and "Stop says: Coach: ..." read as if Stop were the coach. So the
+    message goes between a ``[Coach]`` header and a rule, and the "Coach: "
+    that starts each of the server's lines is dropped. The server's text
+    stays agent-neutral; this framing is Claude Code's alone. The framed
+    message, rules included, stays within the 4 KB cap.
+    """
+    lines = core.clean_message(message).split("\n")
+    body = "\n".join(line.removeprefix("Coach: ") for line in lines)
+    room = core.MAX_MESSAGE_BYTES - len(f"{_HEADER}\n\n{_RULE}".encode())
+    body = body.encode("utf-8")[:room].decode("utf-8", errors="ignore")
+    return f"{_HEADER}\n{body}\n{_RULE}"
+
+
 def emit(reply: core.Reply | None, stdout: TextIO, *, allow_block: bool) -> None:
     """Write the reply as Claude Code hook output, or nothing at all.
 
@@ -155,7 +176,7 @@ def emit(reply: core.Reply | None, stdout: TextIO, *, allow_block: bool) -> None
     """
     if reply is None or reply.message is None:
         return
-    message = core.clean_message(reply.message)
+    message = frame(reply.message)
     out: dict[str, object]
     if reply.block and allow_block:
         out = {

@@ -22,6 +22,7 @@ from conftest import (
     blocked,
     prompt_payload,
     run_hook,
+    shown,
     stop_payload,
 )
 from promptcoach_client import claude_code, core
@@ -36,7 +37,7 @@ def test_before_posts_and_emits_system_message(
 
     out = run_hook("before", prompt_payload(project, "fix it"), env)
 
-    assert json.loads(out) == {"systemMessage": "Say which file."}
+    assert json.loads(out) == shown("Say which file.")
     [req] = server.requests
     assert req.path == "/v1/before"
     assert req.headers["Authorization"] == f"Bearer {TOKEN}"
@@ -322,9 +323,9 @@ def test_missing_token_message_once_per_session(
     other_session = run_hook("before", prompt_payload(project, session_id="sess-2"), env)
 
     message = "Prompt coach: add your token with /plugin → promptcoach → Configure."
-    assert json.loads(first) == {"systemMessage": message}
+    assert json.loads(first) == shown(message)
     assert second == ""
-    assert json.loads(other_session) == {"systemMessage": message}
+    assert json.loads(other_session) == shown(message)
     assert server.requests == []  # no token, no network
 
 
@@ -435,7 +436,7 @@ def test_the_local_block_echoes_nothing(prompt: str, env: dict[str, str], projec
 
     out = run_hook("before", prompt_payload(project, prompt), env)
 
-    assert json.loads(out)["reason"] == REASON
+    assert json.loads(out) == blocked(REASON)
     assert TOKEN not in out
     assert " ".join(prompt.split()).lower() not in out.lower()
 
@@ -509,7 +510,7 @@ def test_ordinary_prompt_with_a_non_blocking_reply_is_unchanged(
 
     out = run_hook("before", prompt_payload(project, "add a test"), env)
 
-    assert out == (json.dumps({"systemMessage": message}) if message else "")
+    assert out == (json.dumps(shown(message)) if message else "")
 
 
 @pytest.mark.parametrize("prompt", COMMAND_PROMPTS)
@@ -534,7 +535,7 @@ def test_command_without_a_token_leaves_the_setup_warning_for_later(
     run_hook("before", prompt_payload(project, "coach, quieter"), env)
     out = run_hook("before", prompt_payload(project, "add a test", prompt_id="prompt-2"), env)
 
-    assert json.loads(out) == {"systemMessage": PROFILE.missing_token_message}
+    assert json.loads(out) == shown(PROFILE.missing_token_message)
 
 
 def test_command_without_a_token_or_data_dir_is_blocked(env: dict[str, str], project: Path) -> None:
@@ -554,7 +555,7 @@ def test_ordinary_prompt_without_a_token_is_unchanged(
 
     out = run_hook("before", prompt_payload(project, prompt), env)
 
-    assert json.loads(out) == {"systemMessage": PROFILE.missing_token_message}
+    assert json.loads(out) == shown(PROFILE.missing_token_message)
 
 
 @pytest.mark.parametrize("kind", sorted(NON_BLOCKING))

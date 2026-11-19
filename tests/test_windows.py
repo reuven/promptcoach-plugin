@@ -22,7 +22,7 @@ from typing import Any
 import pytest
 
 import coach_hook
-from conftest import StubServer, blocked, posix_only, prompt_payload, run_hook
+from conftest import StubServer, blocked, posix_only, prompt_payload, run_hook, shown
 from promptcoach_client import claude_code, gitdiff
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -298,7 +298,7 @@ def test_backslash_cwd_and_transcript_path_still_coach(
 
     out = run_hook("before", payload, env)
 
-    assert json.loads(out) == {"systemMessage": "Say which file."}
+    assert json.loads(out) == shown("Say which file.")
     assert len(server.requests) == 1
 
 
