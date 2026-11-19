@@ -317,3 +317,120 @@ def test_a_parked_thread_is_not_woken_by_another_git_threads_decrement(
     for thread in threads:
         _resume(thread)
     assert not any(thread.is_alive() for thread in threads)
+
+
+# --- Fix round 3: a git whose start ends after the cleanup gave up -------------------------
+#
+# On a slow runner (macos-latest, 3.14) the start outlasted the cleanup's 0.3 s:
+# the cleanup returned, the process ended, and the starting thread never got
+# to kill its git, which was left running. The thread can't be relied on
+# after the cleanup returns (it may never run again), so the cleanup must be
+# able to kill a git it hasn't been handed yet.
+
+LATE_START = """
+real = subprocess.Popen
+started = threading.Event()
+class LatePopen(real):
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)  # git is running: forked, exec'd, its own session
+        started.set()
+        time.sleep(3)  # ... and the start returns long after the process is gone
+        pathlib.Path(sys.argv[2], "ran-after-the-cleanup").touch()
+gitdiff.subprocess.Popen = LatePopen
+threading.Thread(target=work, daemon=True).start()
+started.wait(10)
+"""
+
+
+@posix_only(
+    "test_exit_park.py::test_the_cleanup_kills_a_git_whose_start_has_not_returned",
+    "a sh git found by pgrep",
+)
+def test_a_git_whose_start_ends_after_the_process_is_gone_is_not_orphaned(
+    tmp_path: Path,
+) -> None:
+    seconds = f"30.{os.getpid()}{time.monotonic_ns() % 10**6}"
+    fake, pid_file = _fake_git(tmp_path, seconds)
+    begun = time.monotonic()
+    child = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            PARK_HEAD + LATE_START,
+            str(HOOK.parent),
+            str(tmp_path),
+            str(pid_file),
+        ],
+        env=child_env(path=f"{fake}{os.pathsep}{os.environ['PATH']}"),
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    took = time.monotonic() - begun
+    time.sleep(0.3)
+    pattern = f"sleep {seconds}"
+    left = subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True, check=False)
+    subprocess.run(["pkill", "-9", "-f", pattern], check=False)
+    # The exit still doesn't wait for the stalled start (the merge review's
+    # ruling, p32), the thread runs no Python past the cleanup, and no git
+    # is left behind.
+    assert (child.returncode, child.stdout.split(), child.stderr) == (0, ["parked"], "")
+    assert took < 3
+    assert not (tmp_path / "ran-after-the-cleanup").exists()
+    assert left.stdout.split() == []
+
+
+@posix_only(
+    "test_exit_park.py::test_a_start_that_ends_after_the_exit_cleanup_kills_its_git_and_parks",
+    "the started git reports its own pid before exec (preexec_fn)",
+)
+def test_the_cleanup_kills_a_git_whose_start_has_not_returned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Forced interleaving, in process: git is running but Popen hasn't
+    returned (so run_git hasn't put it in _LIVE) until after the cleanup is
+    over. The cleanup must kill it anyway."""
+    _waiting_git(monkeypatch)
+    monkeypatch.setattr(gitdiff, "_EXIT_WAIT_S", 0.05)
+    current = subprocess.Popen
+    procs: list[subprocess.Popen[bytes]] = []
+    running, cleaned = threading.Event(), threading.Event()
+
+    def late_popen(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+        proc = current(*args, **kwargs)  # type: ignore[call-overload]
+        procs.append(proc)
+        running.set()
+        cleaned.wait(10)  # returns only once the cleanup is over
+        return proc  # type: ignore[no-any-return]
+
+    monkeypatch.setattr(subprocess, "Popen", late_popen)
+    thread = threading.Thread(
+        target=gitdiff.run_git, args=(["status"], tmp_path), kwargs={"timeout": 30}, daemon=True
+    )
+    thread.start()
+    try:
+        assert running.wait(10)
+        gitdiff._exit_cleanup()
+        # Killed by the cleanup itself, before the start returned.
+        deadline = time.monotonic() + 5
+        while _alive(procs[0].pid):
+            assert time.monotonic() < deadline, "the cleanup left the git running"
+            time.sleep(0.02)
+    finally:
+        cleaned.set()
+        for proc in procs:
+            proc.kill()
+    _resume(thread)
+
+
+def _alive(pid: int) -> bool:
+    """True while ``pid`` runs; a zombie (killed, not yet reaped) is not running."""
+    try:
+        state = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, check=False
+        ).stdout.strip()
+    except OSError:  # pragma: no cover
+        return False
+    return bool(state) and not state.startswith("Z")
