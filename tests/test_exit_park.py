@@ -252,3 +252,68 @@ def test_a_git_thread_blocks_signals_before_its_count_drops_and_parks_in_one_ste
     gitdiff._BUSY_CHANGED.release()
     _resume(thread)
     assert not thread.is_alive()
+
+
+class _CountingEvent(threading.Event):
+    """_RESUME's stand-in: counts, per thread, how often a parked thread
+    checks it, which it does each time its wait wakes."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.checks: dict[str, int] = {}
+
+    def is_set(self) -> bool:
+        name = threading.current_thread().name
+        self.checks[name] = self.checks.get(name, 0) + 1
+        return super().is_set()
+
+
+def _parked(checks: dict[str, int], name: str) -> None:
+    """Wait until NAME has checked once and released the lock (it waits)."""
+    deadline = time.monotonic() + 10
+    while not checks.get(name):
+        assert time.monotonic() < deadline, f"{name} never parked"
+        time.sleep(0.01)
+    assert gitdiff._BUSY_CHANGED.acquire(timeout=10)
+    gitdiff._BUSY_CHANGED.release()
+
+
+def test_a_parked_thread_is_not_woken_by_another_git_threads_decrement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fix round 2, item 5: with a tracked git, run_git's thread and its
+    reader are both counted. The reader parks first; run_git's thread then
+    drops its count, and that decrement's notify must not wake the parked
+    reader, which would then run Python while the interpreter finalizes.
+    So a parked thread waits on a condition no decrement notifies."""
+    resume = _CountingEvent()
+    monkeypatch.setattr(gitdiff, "_RESUME", resume)
+    monkeypatch.setattr(signal, "pthread_sigmask", lambda how, mask: set())
+    gitdiff._EXITING.set()
+    go = {"reader": threading.Event(), "run_git": threading.Event()}
+
+    def work(name: str) -> None:
+        with gitdiff._git_thread():
+            go[name].wait(10)
+
+    threads = [threading.Thread(target=work, args=(name,), name=name, daemon=True) for name in go]
+    for thread in threads:
+        thread.start()
+    deadline = time.monotonic() + 10
+    while gitdiff._BUSY[0] < 2:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    go["reader"].set()
+    _parked(resume.checks, "reader")
+    go["run_git"].set()
+    _parked(resume.checks, "run_git")
+    # Before the fix the reader wakes on run_git's notify (a second check)
+    # within milliseconds; give it far longer than that.
+    deadline = time.monotonic() + 0.5
+    while time.monotonic() < deadline and resume.checks["reader"] == 1:
+        time.sleep(0.01)
+    assert resume.checks == {"reader": 1, "run_git": 1}
+    assert gitdiff._BUSY[0] == 0
+    for thread in threads:
+        _resume(thread)
+    assert not any(thread.is_alive() for thread in threads)
