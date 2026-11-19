@@ -1,0 +1,21 @@
+# The CI actions are pinned to full commit SHAs and the dev tools to uv.lock.
+# A pin nobody bumps keeps its CVEs: Dependabot proposes the bumps, weekly,
+# one grouped pull request per ecosystem. The hook itself is stdlib only.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      actions:
+        patterns:
+          - "*"
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      dev-tools:
+        patterns:
+          - "*"
