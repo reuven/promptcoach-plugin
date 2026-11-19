@@ -288,7 +288,9 @@ def test_a_parked_thread_is_not_woken_by_another_git_threads_decrement(
     So a parked thread waits on a condition no decrement notifies."""
     resume = _CountingEvent()
     monkeypatch.setattr(gitdiff, "_RESUME", resume)
-    monkeypatch.setattr(signal, "pthread_sigmask", lambda how, mask: set())
+    # Windows has no pthread_sigmask (gitdiff never calls it there): set it
+    # where it's missing too, so the test runs on every platform.
+    monkeypatch.setattr(signal, "pthread_sigmask", lambda how, mask: set(), raising=False)
     gitdiff._EXITING.set()
     go = {"reader": threading.Event(), "run_git": threading.Event()}
 
@@ -334,7 +336,7 @@ class LatePopen(real):
     def __init__(self, *a, **k):
         super().__init__(*a, **k)  # git is running: forked, exec'd, its own session
         started.set()
-        time.sleep(3)  # ... and the start returns long after the process is gone
+        time.sleep(10)  # ... and the start returns long after the process is gone
         pathlib.Path(sys.argv[2], "ran-after-the-cleanup").touch()
 gitdiff.subprocess.Popen = LatePopen
 threading.Thread(target=work, daemon=True).start()
@@ -377,7 +379,9 @@ def test_a_git_whose_start_ends_after_the_process_is_gone_is_not_orphaned(
     # ruling, p32), the thread runs no Python past the cleanup, and no git
     # is left behind.
     assert (child.returncode, child.stdout.split(), child.stderr) == (0, ["parked"], "")
-    assert took < 3
+    # Well under LatePopen's 10 s, so even a slow runner's exit (the 1.5 s,
+    # the cleanup's 0.3 s, interpreter start-up) ends before the late touch.
+    assert took < 8
     assert not (tmp_path / "ran-after-the-cleanup").exists()
     assert left.stdout.split() == []
 
@@ -422,6 +426,7 @@ def test_the_cleanup_kills_a_git_whose_start_has_not_returned(
         cleaned.set()
         for proc in procs:
             proc.kill()
+            proc.wait(5)
     _resume(thread)
 
 

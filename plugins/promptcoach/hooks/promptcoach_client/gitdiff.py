@@ -198,7 +198,14 @@ def _in_git_child() -> None:
     """preexec_fn: in git's child, after setsid and before exec. SIGTERM is
     unblocked (an orphan still obeys a later SIGTERM); the pid is reported;
     and if the hook has begun to exit, the child ends here, before git runs.
-    Only system calls, as is safe after a fork."""
+
+    Not only system calls: it builds a small bytes object (the pid line) and
+    raises and catches BlockingIOError (an empty flag pipe). That is safe in
+    CPython's child after a fork: the forking thread holds the GIL, so no
+    other thread's Python state is mid-change; the objects are small, so
+    they come from pymalloc, which the GIL guards; and nothing is imported.
+    The earlier preexec_fn, functools.partial(pthread_sigmask, ...), already
+    allocated in the child the same way."""
     signal.pthread_sigmask(signal.SIG_UNBLOCK, (signal.SIGTERM,))
     if os.getpid() == _PARENT_PID:  # called in process (a test): not a child
         return
