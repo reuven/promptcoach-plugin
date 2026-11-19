@@ -226,8 +226,8 @@ def test_messages_lose_control_characters_and_are_capped(
 
     message = json.loads(run_hook("before", prompt_payload(project), env))["systemMessage"]
 
-    assert message.split("\n", 1)[1].startswith(
-        "]8;;https://evil.exampleclick]8;; [2J[31mRED31m line\n\ttab"
+    assert message.startswith(
+        "[Coach] ]8;;https://evil.exampleclick]8;; [2J[31mRED31m line\n  \ttab"
     )
     assert not any((ord(c) < 32 and c not in "\n\t") or 127 <= ord(c) < 160 for c in message)
     assert len(message.encode()) <= 4096

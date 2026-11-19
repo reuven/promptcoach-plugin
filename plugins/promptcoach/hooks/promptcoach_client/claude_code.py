@@ -138,10 +138,6 @@ def turn_ended(payload: Mapping[str, Any], env: Mapping[str, str]) -> core.TurnE
     )
 
 
-_RULE = "─" * 40
-_HEADER = "[Coach] " + _RULE[len("[Coach] ") :]
-
-
 def _drop_coach(line: str) -> str:
     """The line without a leading "Coach: ", its first letter capitalized."""
     if not line.startswith("Coach: "):
@@ -151,21 +147,20 @@ def _drop_coach(line: str) -> str:
 
 
 def frame(message: str) -> str:
-    """The message as Claude Code should show it: cleaned, under a header.
+    """The message as Claude Code should show it: cleaned, marked ``[Coach]``.
 
     Claude Code puts its own label before a hook's message ("Stop says: "),
     and "Stop says: Coach: ..." read as if Stop were the coach. So the
-    message goes between a ``[Coach]`` header and a rule, and the "Coach: "
-    that starts each of the server's lines is dropped, with the sentence
-    after it capitalized. The server's text stays agent-neutral; this
-    framing is Claude Code's alone. The framed message, rules included,
-    stays within the 4 KB cap.
+    message starts with ``[Coach]`` and every later line is indented under
+    it; the "Coach: " that starts each of the server's lines is dropped,
+    with the sentence after it capitalized. (1.0.0b5's rules above and below
+    looked heavier than the one line they framed.) The server's text stays
+    agent-neutral; this framing is Claude Code's alone, and stays within
+    the 4 KB cap.
     """
-    lines = core.clean_message(message).split("\n")
-    body = "\n".join(_drop_coach(line) for line in lines)
-    room = core.MAX_MESSAGE_BYTES - len(f"{_HEADER}\n\n{_RULE}".encode())
-    body = body.encode("utf-8")[:room].decode("utf-8", errors="ignore")
-    return f"{_HEADER}\n{body}\n{_RULE}"
+    first, *rest = [_drop_coach(line) for line in core.clean_message(message).split("\n")]
+    text = "\n".join([f"[Coach] {first}", *(f"  {line}" if line else "" for line in rest)])
+    return text.encode("utf-8")[: core.MAX_MESSAGE_BYTES].decode("utf-8", errors="ignore")
 
 
 def emit(reply: core.Reply | None, stdout: TextIO, *, allow_block: bool) -> None:
