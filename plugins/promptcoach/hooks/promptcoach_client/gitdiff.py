@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import atexit
 import contextlib
-import functools
 import math
 import os
 import re
@@ -152,6 +151,65 @@ _BUSY: list[int] = [0]
 _BUSY_LOCK = threading.RLock()
 _BUSY_CHANGED = threading.Condition(_BUSY_LOCK)
 _PARKED = threading.Condition(_BUSY_LOCK)
+
+# A git whose start (Popen) hasn't returned isn't in _LIVE yet, and if the
+# start outlasts the exit cleanup's wait, its thread may never run again:
+# the process can end first, leaving git orphaned (fix round 3). So each git
+# child, between fork and exec (preexec_fn, POSIX), reports its own pid on
+# _STARTED and then checks _EXIT_BEGUN; the cleanup writes _EXIT_BEGUN
+# before it reads _STARTED. Pipes, so every step is a system call, in order:
+# a pid reported before the cleanup's read is killed by the cleanup; one
+# reported after it sees the exit flag and the child ends before exec, so
+# no git runs. run_git reads its own pid back (under _STARTING, after
+# putting git in _LIVE), so the cleanup only ever finds a start still in
+# progress, whose pid can't have been reused (it isn't reaped). Both ends
+# are non-blocking and close on exec: git inherits neither.
+_PARENT_PID = os.getpid()
+_STARTED_R = _STARTED_W = _EXIT_BEGUN_R = _EXIT_BEGUN_W = -1
+if os.name != "nt":  # pragma: no branch - Windows has no preexec_fn
+    _STARTED_R, _STARTED_W = os.pipe()
+    _EXIT_BEGUN_R, _EXIT_BEGUN_W = os.pipe()
+    for _fd in (_STARTED_R, _STARTED_W, _EXIT_BEGUN_R, _EXIT_BEGUN_W):
+        os.set_blocking(_fd, False)
+_EXIT_FLAG = b"x" * 512  # one byte per child that starts after it; few ever do
+
+
+def _drain(fd: int) -> bytes:
+    """Everything waiting in a non-blocking pipe (none: b"")."""
+    data = b""
+    if fd < 0:
+        return data
+    while True:
+        try:
+            chunk = os.read(fd, 4096)
+        except OSError:  # BlockingIOError: empty
+            return data
+        if not chunk:
+            return data
+        data += chunk
+
+
+def _unreturned_starts() -> list[int]:
+    """Pids of gits started (forked, past setsid) whose start hasn't returned."""
+    return [int(word) for word in _drain(_STARTED_R).split()]
+
+
+def _in_git_child() -> None:
+    """preexec_fn: in git's child, after setsid and before exec. SIGTERM is
+    unblocked (an orphan still obeys a later SIGTERM); the pid is reported;
+    and if the hook has begun to exit, the child ends here, before git runs.
+    Only system calls, as is safe after a fork."""
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, (signal.SIGTERM,))
+    if os.getpid() == _PARENT_PID:  # called in process (a test): not a child
+        return
+    with contextlib.suppress(OSError):
+        os.write(_STARTED_W, b"%d\n" % os.getpid())
+    try:
+        begun = os.read(_EXIT_BEGUN_R, 1)
+    except OSError:  # BlockingIOError: the hook isn't exiting
+        return
+    if begun:
+        os._exit(126)
 
 
 class _WinJobs:  # pragma: no cover - Windows only; test_real_job_object_kills_a_process_tree
@@ -282,12 +340,12 @@ def _exit_cleanup() -> None:
     """At exit: kill the running git, waiting briefly for one that is just
     starting, then for every git thread to park.
 
-    Not a guarantee: a git start (Popen) stalled past the 0.3 s doesn't hold
-    the hook's exit (p32). That thread is still counted when the cleanup
-    returns, so it can wake and run Python while the interpreter finalizes,
-    and if the hook's process ends before the late start finishes, nothing
-    is left to kill that git: it can be orphaned. A git that starts while
-    the process still runs is killed as soon as it has started.
+    A git start (Popen) stalled past the 0.3 s doesn't hold the hook's exit
+    (p32). Its git is killed anyway: the child reported its pid before exec
+    (_in_git_child), and the cleanup kills every start that hasn't returned;
+    a child that reports after that ends before exec. The stalled thread is
+    still counted when the cleanup returns; if it runs again before the
+    process ends, it finds the hook exiting and parks.
     """
     wait_until = time.monotonic() + _EXIT_WAIT_S
     # Under _BUSY_CHANGED, so a git thread's last critical section sees
@@ -295,8 +353,13 @@ def _exit_cleanup() -> None:
     # change in the middle of it.
     with _BUSY_CHANGED:
         _EXITING.set()
+    if _EXIT_BEGUN_W >= 0:  # before reading _STARTED: see _in_git_child
+        with contextlib.suppress(OSError):
+            os.write(_EXIT_BEGUN_W, _EXIT_FLAG)
     acquired = _STARTING.acquire(timeout=_EXIT_WAIT_S)
     try:
+        for pid in _unreturned_starts():
+            _kill_pid(pid)
         _kill_live()
     finally:
         if acquired:
@@ -396,16 +459,11 @@ def _env(index_file: Path | None = None) -> dict[str, str]:
 
 
 def _start_options(windows: bool) -> dict[str, Any]:
-    """How git is started: in its own session with SIGTERM unblocked (POSIX),
-    or in a new process group (Windows, which has neither)."""
+    """How git is started: in its own session, through _in_git_child
+    (POSIX), or in a new process group (Windows, which has neither)."""
     if windows:
         return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200)}
-    return {
-        "start_new_session": True,
-        "preexec_fn": functools.partial(
-            signal.pthread_sigmask, signal.SIG_UNBLOCK, (signal.SIGTERM,)
-        ),
-    }
+    return {"start_new_session": True, "preexec_fn": _in_git_child}
 
 
 def run_git(
@@ -444,19 +502,24 @@ def _run_git(
     mask = None if windows else signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
     try:
         with _STARTING:
-            # git from PATH, as the agent runs it; the arguments are ours alone.
-            proc = subprocess.Popen(  # noqa: S603
-                [*GIT_COMMAND, "--no-pager", *_SAFE_CONFIG, *args],
-                cwd=cwd,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                env=_env(index_file),
-                **_start_options(windows),
-            )
-            _LIVE.add(proc.pid)
-            if windows:
-                _add_job(proc)
+            try:
+                # git from PATH, as the agent runs it; the arguments are ours alone.
+                proc = subprocess.Popen(  # noqa: S603
+                    [*GIT_COMMAND, "--no-pager", *_SAFE_CONFIG, *args],
+                    cwd=cwd,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    env=_env(index_file),
+                    **_start_options(windows),
+                )
+                _LIVE.add(proc.pid)
+                if windows:
+                    _add_job(proc)
+            finally:
+                # In _LIVE first, then taken back from _STARTED: the exit
+                # cleanup finds this git in one or the other.
+                _unreturned_starts()
     except OSError:  # git missing, cwd gone
         return None
     finally:

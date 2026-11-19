@@ -434,3 +434,80 @@ def _alive(pid: int) -> bool:
     except OSError:  # pragma: no cover
         return False
     return bool(state) and not state.startswith("Z")
+
+
+# The child's half of the handshake runs between fork and exec, where coverage
+# can't see it: the same function, in process, posing as a child.
+
+
+class _Exited(Exception):
+    pass
+
+
+def _as_child(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    codes: list[int] = []
+
+    def exit_(code: int) -> None:
+        codes.append(code)
+        raise _Exited
+
+    monkeypatch.setattr(gitdiff, "_PARENT_PID", -1)
+    monkeypatch.setattr(os, "_exit", exit_)
+    return codes
+
+
+@posix_only("test_windows.py::test_start_options_per_platform", "preexec_fn is POSIX")
+def test_a_git_child_reports_its_pid_and_runs_on_while_the_hook_is_not_exiting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codes = _as_child(monkeypatch)
+    gitdiff._in_git_child()
+    assert codes == []
+    assert gitdiff._unreturned_starts() == [os.getpid()]
+    assert gitdiff._unreturned_starts() == []
+
+
+@posix_only("test_windows.py::test_start_options_per_platform", "preexec_fn is POSIX")
+def test_a_git_child_ends_before_exec_once_the_hook_is_exiting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codes = _as_child(monkeypatch)
+    os.write(gitdiff._EXIT_BEGUN_W, b"x")
+    with pytest.raises(_Exited):
+        gitdiff._in_git_child()
+    assert codes == [126]
+    gitdiff._unreturned_starts()
+
+
+@posix_only("test_windows.py::test_start_options_per_platform", "preexec_fn is POSIX")
+def test_a_git_child_runs_on_when_it_cannot_report_or_the_flag_pipe_is_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codes = _as_child(monkeypatch)
+    read, write = os.pipe()
+    os.close(write)  # nobody can write the flag: EOF, b""
+    monkeypatch.setattr(gitdiff, "_STARTED_W", -1)  # the report fails: EBADF
+    monkeypatch.setattr(gitdiff, "_EXIT_BEGUN_R", read)
+    try:
+        gitdiff._in_git_child()
+        assert gitdiff._drain(read) == b""
+    finally:
+        os.close(read)
+    assert codes == []
+    assert gitdiff._unreturned_starts() == []
+
+
+def test_drain_without_a_pipe_is_empty() -> None:
+    assert gitdiff._drain(-1) == b""
+
+
+def test_exit_cleanup_without_or_with_a_broken_flag_pipe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Windows has no flag pipe; a write that fails must not stop the cleanup."""
+    killed: list[int] = []
+    monkeypatch.setattr(gitdiff, "_kill_live", lambda: killed.append(1))
+    for fd in (-1, 2**20):
+        monkeypatch.setattr(gitdiff, "_EXIT_BEGUN_W", fd)
+        gitdiff._exit_cleanup()
+    assert killed == [1, 1]

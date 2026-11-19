@@ -288,6 +288,9 @@ def _exit_cleanup_undone() -> Iterator[None]:
             gitdiff._PARKED.notify_all()
         gitdiff._EXITING.clear()
         gitdiff._RESUME.clear()
+        # The exit flag the cleanup left for git children: the next test's
+        # gits must start.
+        gitdiff._drain(gitdiff._EXIT_BEGUN_R)
 
 
 @pytest.fixture(autouse=True)
