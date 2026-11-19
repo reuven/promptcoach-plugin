@@ -40,7 +40,7 @@ def test_before_posts_and_emits_system_message(
     assert req.path == "/v1/before"
     assert req.headers["Authorization"] == f"Bearer {TOKEN}"
     assert req.body["agent"] == "claude-code"
-    assert req.body["plugin_version"] == "1.0.0b2"
+    assert req.body["plugin_version"] == "1.0.0b3"
     assert req.body["session_id"] == "sess-1"
     assert req.body["prompt_id"] == "prompt-1"
     assert req.body["prompt"] == "fix it"

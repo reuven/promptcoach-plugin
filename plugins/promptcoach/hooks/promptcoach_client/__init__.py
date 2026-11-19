@@ -6,4 +6,4 @@ adapter module turns its agent's hook payloads into the neutral events in
 library only, Python 3.9 or newer.
 """
 
-__version__ = "1.0.0b2"
+__version__ = "1.0.0b3"
