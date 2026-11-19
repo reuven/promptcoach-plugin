@@ -996,7 +996,7 @@ wheels = [
 
 [[package]]
 name = "promptcoach-plugin"
-version = "1.0.0b5"
+version = "1.0.0b6"
 source = { virtual = "." }
 
 [package.dev-dependencies]
