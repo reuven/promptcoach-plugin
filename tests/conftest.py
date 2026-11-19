@@ -277,6 +277,23 @@ def _sigterm_left_alone() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def _exit_cleanup_undone() -> Iterator[None]:
+    """A test that runs the exit cleanup in-process leaves the hook "exiting",
+    so every later run_git would park: let any parked thread go (a waiter
+    already woken stays woken after the clear) and start the next test fresh."""
+    yield
+    if gitdiff._EXITING.is_set():
+        gitdiff._RESUME.set()
+        with gitdiff._PARKED:  # a thread parked on it needs the notify
+            gitdiff._PARKED.notify_all()
+        gitdiff._EXITING.clear()
+        gitdiff._RESUME.clear()
+        # The exit flag the cleanup left for git children: the next test's
+        # gits must start.
+        gitdiff._drain(gitdiff._EXIT_BEGUN_R)
+
+
+@pytest.fixture(autouse=True)
 def _per_test_timeout() -> Iterator[None]:
     TIMED_OUT.clear()
     if not hasattr(signal, "SIGALRM"):  # Windows

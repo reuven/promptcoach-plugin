@@ -328,7 +328,9 @@ def test_sigterm_while_another_thread_starts_git_kills_it(tmp_path: Path) -> Non
 )
 def test_exit_while_another_thread_starts_git_kills_it(tmp_path: Path) -> None:
     """The exit cleanup waits for the starting thread too (p32), for up to
-    0.3 s: here the start takes 0.2 s."""
+    0.3 s: here the start takes 0.2 s. On a slow machine it takes longer; the
+    cleanup then kills git from the pid its child reported (fix round 3,
+    test_exit_park.py), so this holds either way."""
     code, orphans = _run_child(CHILD_HEAD + "STALL = 0.2\n" + SLOW_START, tmp_path)
     assert code == 0
     assert orphans == 0

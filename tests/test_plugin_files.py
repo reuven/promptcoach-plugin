@@ -169,7 +169,7 @@ def test_every_version_string_is_one_value() -> None:
     assert pyproject is not None
     versions = {plugin["version"], pyproject.group(1), __version__}
     versions |= {p["version"] for p in market["plugins"] if "version" in p}
-    assert versions == {"1.0.0b3"}
+    assert versions == {"1.0.0b4"}
 
 
 def _ci_jobs() -> dict[str, str]:
@@ -351,3 +351,22 @@ def test_every_test_id_is_short() -> None:
     # this failure can't flood a log the way the ids themselves did.
     too_long = [f"{n[:100]}... ({len(n)} chars)" for n in ids if len(n) > MAX_NODEID_CHARS]
     assert not too_long, "\n".join(too_long)
+
+
+def test_dependabot_bumps_the_actions_and_the_lock_weekly_and_grouped() -> None:
+    # The CI actions are pinned to full SHAs and the dev tools to a lock:
+    # a pin nobody bumps keeps its CVEs, so Dependabot proposes the bumps,
+    # once a week, one grouped pull request per ecosystem.
+    text = (ROOT / ".github" / "dependabot.yml").read_text()
+    assert re.search(r"^version: 2$", text, re.M)
+    blocks = re.split(r"^  - ", text, flags=re.M)[1:]
+    by_ecosystem = {
+        re.search(r'package-ecosystem: "?([\w-]+)"?', b).group(1): b  # type: ignore[union-attr]
+        for b in blocks
+    }
+    assert set(by_ecosystem) == {"github-actions", "uv"}
+    for block in by_ecosystem.values():
+        assert re.search(r'directory: "?/"?$', block, re.M)
+        assert re.search(r'interval: "?weekly"?$', block, re.M)
+        assert "groups:" in block
+        assert re.search(r'patterns:\s*\n\s*- "\*"', block)
