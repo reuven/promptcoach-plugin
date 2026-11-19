@@ -35,6 +35,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -135,6 +136,17 @@ _PENDING_TERM: set[int] = set()
 # and miss it. Reentrant: a SIGTERM handled during the exit cleanup takes it
 # again in the same thread, and mustn't deadlock.
 _STARTING = threading.RLock()
+
+# Set by the exit cleanup. From then on no git starts, and a thread done with
+# git parks instead of returning: the cleanup's kill wakes run_git's thread
+# and its reader just as the interpreter finalizes, and CPython 3.9 can crash
+# (SIGSEGV) when a daemon thread takes the GIL then. _BUSY counts the threads
+# inside run_git (readers included), so the cleanup can wait until each one
+# has parked. _RESUME is never set in a hook; tests set it to let threads go.
+_EXITING = threading.Event()
+_RESUME = threading.Event()
+_BUSY: list[int] = [0]
+_BUSY_CHANGED = threading.Condition()
 
 
 class _WinJobs:  # pragma: no cover - Windows only; test_real_job_object_kills_a_process_tree
@@ -263,14 +275,44 @@ _EXIT_WAIT_S = 0.3  # how long the exit cleanup waits for a git that is starting
 
 def _exit_cleanup() -> None:
     """At exit: kill the running git, waiting briefly for one that is just
-    starting. A start stalled longer doesn't hold the hook's exit: whatever is
-    tracked by then is killed anyway."""
+    starting, then for every git thread to park. A start stalled longer
+    doesn't hold the hook's exit: whatever is tracked by then is killed
+    anyway, and a git that starts later is killed as soon as it has."""
+    wait_until = time.monotonic() + _EXIT_WAIT_S
+    _EXITING.set()
     acquired = _STARTING.acquire(timeout=_EXIT_WAIT_S)
     try:
         _kill_live()
     finally:
         if acquired:
             _STARTING.release()
+    with _BUSY_CHANGED:
+        _BUSY_CHANGED.wait_for(lambda: not _BUSY[0], max(wait_until - time.monotonic(), 0.0))
+
+
+def _park() -> None:
+    """Never return (unless a test sets _RESUME): wait on a lock, outside
+    the GIL, with every signal blocked, so this thread runs no Python while
+    the interpreter shuts down."""
+    if not WINDOWS:
+        signal.pthread_sigmask(signal.SIG_BLOCK, signal.valid_signals())
+    _RESUME.wait()
+
+
+@contextlib.contextmanager
+def _git_thread() -> Iterator[None]:
+    """Count this thread as busy with git; when it is done, it returns as
+    usual, or parks if the exit cleanup has begun."""
+    with _BUSY_CHANGED:
+        _BUSY[0] += 1
+    try:
+        yield
+    finally:
+        with _BUSY_CHANGED:
+            _BUSY[0] -= 1
+            _BUSY_CHANGED.notify_all()
+        if _EXITING.is_set():
+            _park()
 
 
 def _on_term(signum: int, frame: object) -> None:
@@ -351,8 +393,19 @@ def run_git(
     Output beyond ``limit`` bytes isn't read: git is stopped and the result is
     marked truncated, so a huge diff can't fill memory. Git runs in its own
     process group, and a stop kills the whole group: a program git started
-    can't outlive it or hold its output open.
+    can't outlive it or hold its output open. Once the hook is exiting, no git
+    starts, and the calling thread parks rather than return (_EXITING).
     """
+    if _EXITING.is_set():
+        _park()
+        return None
+    with _git_thread():
+        return _run_git(args, cwd, timeout, limit, index_file)
+
+
+def _run_git(
+    args: list[str], cwd: Path, timeout: float, limit: int, index_file: Path | None
+) -> GitOutput | None:
     if timeout < _MIN_STEP_S:
         return None
     # SIGTERM is blocked in this thread, and the handler kept out by the
@@ -384,35 +437,42 @@ def run_git(
         if threading.get_ident() in _PENDING_TERM:
             _PENDING_TERM.discard(threading.get_ident())
             _on_term(signal.SIGTERM, None)
+    if _EXITING.is_set():  # the exit cleanup ran while git started: it can't miss it
+        _kill(proc)
     chunks: list[bytes] = []
     stdout = proc.stdout
     assert stdout is not None  # noqa: S101 - PIPE always sets it
 
+    # Set when the read is over: the reader may then park rather than end.
+    finished = threading.Event()
+
     def read() -> None:
-        try:
-            with contextlib.suppress(Exception):  # a thread's error would print to stderr
-                chunks.append(stdout.read(limit + 1))
-        finally:
-            stdout.close()  # here too: a read still blocked at the end is closed when it ends
+        with _git_thread():
+            try:
+                with contextlib.suppress(Exception):  # a thread's error would print to stderr
+                    chunks.append(stdout.read(limit + 1))
+            finally:
+                stdout.close()  # here too: a read still blocked at the end is closed when it ends
+                finished.set()
 
     reader = threading.Thread(target=read, daemon=True)
     deadline = time.monotonic() + timeout
     reader.start()
-    reader.join(timeout)
+    finished.wait(timeout)
     truncated = bool(chunks) and len(chunks[0]) > limit
     try:
-        if reader.is_alive() or truncated:
+        if not finished.is_set() or truncated:
             _kill(proc)
             # The pipe closes with git's group (POSIX) or job; if something
             # still holds it (a wrapper's child on Windows), stop waiting.
-            reader.join(_READER_GRACE_S)
+            finished.wait(_READER_GRACE_S)
         code = proc.wait(max(deadline - time.monotonic(), 0.1))
     except subprocess.TimeoutExpired:  # git closed its output but kept running
         _kill(proc)
         proc.wait()
         return None
     finally:
-        if not reader.is_alive():  # closing under a blocked read would wait for it
+        if finished.is_set():  # closing under a blocked read would wait for it
             stdout.close()
         _LIVE.discard(proc.pid)
         job = _JOB_OF.pop(proc.pid, None)

@@ -545,6 +545,7 @@ def test_exit_cleanup_waits_for_a_git_that_is_starting_and_kills_it(
         _reap(pid_file)
         for proc in procs:
             proc.kill()
+        gitdiff._RESUME.set()  # the thread parked (test_exit_park.py)
         thread.join(5)
 
 
