@@ -230,42 +230,44 @@ def test_tool_ran_ignores_non_string_prompt_id() -> None:
     assert run is not None and run.prompt_id is None and run.output == "" and run.exit_code == 0
 
 
-TOP = "[Coach] " + "─" * 32
-BOTTOM = "─" * 40
-
-
 def test_frame_sets_the_coach_off_from_claude_codes_label() -> None:
     """Claude Code shows "Stop says: " before a hook's message; "Stop says:
-    Coach: ..." was confusing, so the message gets a header and a rule."""
-    assert claude_code.frame("Coach: add a test.") == f"{TOP}\nAdd a test.\n{BOTTOM}"
+    Coach: ..." was confusing, so the message starts with ``[Coach]``."""
+    assert claude_code.frame("Coach: add a test.") == "[Coach] Add a test."
 
 
-def test_frame_drops_coach_at_the_start_of_every_line_only() -> None:
-    message = "A sharper version: x\nCoach: one.\n  Why: Coach: stays.\nCoach: two."
-    assert claude_code.frame(message) == (
-        f"{TOP}\nA sharper version: x\nOne.\n  Why: Coach: stays.\nTwo.\n{BOTTOM}"
+def test_frame_indents_every_line_after_the_first() -> None:
+    message = "Coach: one.\n  Why: Coach: stays.\nCoach: two.\nTry: x"
+    assert claude_code.frame(message) == ("[Coach] One.\n    Why: Coach: stays.\n  Two.\n  Try: x")
+
+
+def test_frame_leaves_a_first_line_without_coach_as_it_is() -> None:
+    assert claude_code.frame("A sharper version: x\nCoach: one.") == (
+        "[Coach] A sharper version: x\n  One."
     )
 
 
-def test_frame_capitalizes_only_where_it_dropped_coach() -> None:
-    assert claude_code.frame("Coach: été.\nlower stays.\nCoach: ") == (
-        f"{TOP}\nÉté.\nlower stays.\n\n{BOTTOM}"
+def test_frame_capitalizes_only_where_it_dropped_coach_and_keeps_blank_lines() -> None:
+    assert claude_code.frame("Coach: \u00e9t\u00e9.\nlower stays.\n\nCoach: ") == (
+        "[Coach] \u00c9t\u00e9.\n  lower stays.\n\n"
     )
 
 
 def test_frame_keeps_the_whole_message_within_4_kb() -> None:
-    framed = claude_code.frame("Coach: " + "é" * 5_000)
+    framed = claude_code.frame("Coach: " + "\u00e9" * 5_000)
     assert len(framed.encode()) <= core.MAX_MESSAGE_BYTES
-    assert framed.startswith(f"{TOP}\nÉ") and framed.endswith(f"\n{BOTTOM}")
+    assert framed.startswith("[Coach] \u00c9\u00e9")
+    lines = claude_code.frame("Coach: a\n" + "b\n" * 3_000)
+    assert len(lines.encode()) <= core.MAX_MESSAGE_BYTES
 
 
 def test_emit_frames_both_shown_and_blocking_messages() -> None:
     out = io.StringIO()
     emit(core.Reply("Coach: hi.", False, False), out, allow_block=True)
-    assert json.loads(out.getvalue()) == {"systemMessage": f"{TOP}\nHi.\n{BOTTOM}"}
+    assert json.loads(out.getvalue()) == {"systemMessage": "[Coach] Hi."}
     out = io.StringIO()
     emit(core.Reply("Coach: hi.", True, False), out, allow_block=True)
-    assert json.loads(out.getvalue())["reason"] == f"{TOP}\nHi.\n{BOTTOM}"
+    assert json.loads(out.getvalue())["reason"] == "[Coach] Hi."
 
 
 def test_emit_writes_nothing_for_silence() -> None:
