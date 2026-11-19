@@ -142,11 +142,16 @@ _STARTING = threading.RLock()
 # and its reader just as the interpreter finalizes, and CPython 3.9 can crash
 # (SIGSEGV) when a daemon thread takes the GIL then. _BUSY counts the threads
 # inside run_git (readers included), so the cleanup can wait until each one
-# has parked. _RESUME is never set in a hook; tests set it to let threads go.
+# has parked. A parked thread waits on _PARKED, which shares _BUSY_CHANGED's
+# lock but which no decrement notifies, so one thread's decrement never wakes
+# another that has parked. _RESUME is never set in a hook; tests set it (and
+# notify _PARKED) to let threads go.
 _EXITING = threading.Event()
 _RESUME = threading.Event()
 _BUSY: list[int] = [0]
-_BUSY_CHANGED = threading.Condition()
+_BUSY_LOCK = threading.RLock()
+_BUSY_CHANGED = threading.Condition(_BUSY_LOCK)
+_PARKED = threading.Condition(_BUSY_LOCK)
 
 
 class _WinJobs:  # pragma: no cover - Windows only; test_real_job_object_kills_a_process_tree
@@ -316,9 +321,11 @@ def _git_thread() -> Iterator[None]:
 
     Parking happens in one critical section: every signal is blocked while
     the thread is still counted, then the count drops, and the thread waits
-    on _BUSY_CHANGED, which releases the lock and sleeps in one step. So the
-    cleanup, which returns once the count is 0, never returns while this
-    thread can still run Python with signals open.
+    on _PARKED (same lock), which releases the lock and sleeps in one step.
+    So the cleanup, which returns once the count is 0, never returns while
+    this thread can still run Python with signals open. And since nothing in
+    a hook notifies _PARKED, a later decrement (run_git's thread, after its
+    reader parked) wakes only the cleanup, never a parked thread.
     """
     with _BUSY_CHANGED:
         _BUSY[0] += 1
@@ -332,10 +339,8 @@ def _git_thread() -> Iterator[None]:
             _BUSY[0] -= 1
             _BUSY_CHANGED.notify_all()
             if exiting:
-                # Woken only by the decrements of other git threads while
-                # the cleanup is still waiting (before finalization), or by
-                # a test that sets _RESUME and notifies.
-                _BUSY_CHANGED.wait_for(_RESUME.is_set)
+                # Woken only by a test that sets _RESUME and notifies _PARKED.
+                _PARKED.wait_for(_RESUME.is_set)
 
 
 def _on_term(signum: int, frame: object) -> None:

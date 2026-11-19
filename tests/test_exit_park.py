@@ -105,10 +105,10 @@ def _waiting_git(monkeypatch: pytest.MonkeyPatch) -> None:
 def _resume(thread: threading.Thread) -> None:
     """Let a parked thread go (no hook ever does), so the test leaves none
     behind; conftest does it too, after a test that failed first. A thread
-    parked on _BUSY_CHANGED needs a notify to see _RESUME."""
+    parked on _PARKED needs a notify to see _RESUME."""
     gitdiff._RESUME.set()
-    with gitdiff._BUSY_CHANGED:
-        gitdiff._BUSY_CHANGED.notify_all()
+    with gitdiff._PARKED:
+        gitdiff._PARKED.notify_all()
     thread.join(10)
 
 
@@ -217,7 +217,7 @@ def test_a_git_thread_blocks_signals_before_its_count_drops_and_parks_in_one_ste
     """Fix round M6: between the decrement that lets the exit cleanup return
     and the park, the thread must run no Python with signals open. So it
     blocks every signal while still counted and holding _BUSY_CHANGED, and
-    parks by waiting on that same condition (which drops the lock and
+    parks by waiting on _PARKED, which shares that lock (and drops it and
     sleeps in one step), never after letting go of it."""
     gitdiff._EXITING.set()
     real = signal.pthread_sigmask
