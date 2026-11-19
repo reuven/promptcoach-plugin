@@ -275,11 +275,21 @@ _EXIT_WAIT_S = 0.3  # how long the exit cleanup waits for a git that is starting
 
 def _exit_cleanup() -> None:
     """At exit: kill the running git, waiting briefly for one that is just
-    starting, then for every git thread to park. A start stalled longer
-    doesn't hold the hook's exit: whatever is tracked by then is killed
-    anyway, and a git that starts later is killed as soon as it has."""
+    starting, then for every git thread to park.
+
+    Not a guarantee: a git start (Popen) stalled past the 0.3 s doesn't hold
+    the hook's exit (p32). That thread is still counted when the cleanup
+    returns, so it can wake and run Python while the interpreter finalizes,
+    and if the hook's process ends before the late start finishes, nothing
+    is left to kill that git: it can be orphaned. A git that starts while
+    the process still runs is killed as soon as it has started.
+    """
     wait_until = time.monotonic() + _EXIT_WAIT_S
-    _EXITING.set()
+    # Under _BUSY_CHANGED, so a git thread's last critical section sees
+    # either "not exiting" (and returns) or "exiting" (and parks), never a
+    # change in the middle of it.
+    with _BUSY_CHANGED:
+        _EXITING.set()
     acquired = _STARTING.acquire(timeout=_EXIT_WAIT_S)
     try:
         _kill_live()
@@ -302,17 +312,30 @@ def _park() -> None:
 @contextlib.contextmanager
 def _git_thread() -> Iterator[None]:
     """Count this thread as busy with git; when it is done, it returns as
-    usual, or parks if the exit cleanup has begun."""
+    usual, or parks if the exit cleanup has begun.
+
+    Parking happens in one critical section: every signal is blocked while
+    the thread is still counted, then the count drops, and the thread waits
+    on _BUSY_CHANGED, which releases the lock and sleeps in one step. So the
+    cleanup, which returns once the count is 0, never returns while this
+    thread can still run Python with signals open.
+    """
     with _BUSY_CHANGED:
         _BUSY[0] += 1
     try:
         yield
     finally:
         with _BUSY_CHANGED:
+            exiting = _EXITING.is_set()
+            if exiting and not WINDOWS:
+                signal.pthread_sigmask(signal.SIG_BLOCK, signal.valid_signals())
             _BUSY[0] -= 1
             _BUSY_CHANGED.notify_all()
-        if _EXITING.is_set():
-            _park()
+            if exiting:
+                # Woken only by the decrements of other git threads while
+                # the cleanup is still waiting (before finalization), or by
+                # a test that sets _RESUME and notifies.
+                _BUSY_CHANGED.wait_for(_RESUME.is_set)
 
 
 def _on_term(signum: int, frame: object) -> None:
