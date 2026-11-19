@@ -19,6 +19,7 @@ from conftest import (
     ORDINARY_PROMPTS,
     TOKEN,
     StubServer,
+    blocked,
     prompt_payload,
     run_hook,
     stop_payload,
@@ -40,7 +41,7 @@ def test_before_posts_and_emits_system_message(
     assert req.path == "/v1/before"
     assert req.headers["Authorization"] == f"Bearer {TOKEN}"
     assert req.body["agent"] == "claude-code"
-    assert req.body["plugin_version"] == "1.0.0b4"
+    assert req.body["plugin_version"] == "1.0.0b5"
     assert req.body["session_id"] == "sess-1"
     assert req.body["prompt_id"] == "prompt-1"
     assert req.body["prompt"] == "fix it"
@@ -73,7 +74,7 @@ def test_block_reply_emits_decision_block(
 
     out = run_hook("before", prompt_payload(project, "coach, louder"), env)
 
-    assert json.loads(out) == {"decision": "block", "reason": "Coach level set to teach."}
+    assert json.loads(out) == blocked("Coach level set to teach.")
 
 
 def test_silent_reply_prints_nothing(
@@ -378,7 +379,7 @@ def _no_answer(kind: str, server: StubServer, env: dict[str, str]) -> None:
 # The whole reason, fixed: what happened and what to do, in the server's voice
 # (its own COMMAND_RETRY). Nothing the person typed, and no token.
 REASON = "Coach: I didn't answer in time, so that command wasn't applied. Please send it again."
-NOT_ANSWERED = {"decision": "block", "reason": REASON}
+NOT_ANSWERED = blocked(REASON)
 
 
 @pytest.mark.parametrize("kind", sorted(NO_ANSWER))
@@ -444,7 +445,7 @@ def test_a_server_block_still_wins(server: StubServer, env: dict[str, str], proj
 
     out = json.loads(run_hook("before", prompt_payload(project, "coach, quieter"), env))
 
-    assert out == {"decision": "block", "reason": "Coach: quieter now."}
+    assert out == blocked("Coach: quieter now.")
 
 
 def test_no_local_block_for_an_agent_that_cannot_block(env: dict[str, str], project: Path) -> None:
@@ -492,7 +493,7 @@ def test_command_with_a_non_blocking_reply_is_blocked(
 
     out = json.loads(run_hook("before", prompt_payload(repo, "coach, quieter"), env))
 
-    assert out == {"decision": "block", "reason": server.reply["message"] or REASON}
+    assert out == blocked(server.reply["message"] or REASON)
     # A real reply: its setting is still remembered. A blocked prompt keeps no snapshot.
     state = json.loads((data_dir / "state.json").read_text())
     assert state["prompt_only"] is server.reply["prompt_only"]
@@ -519,7 +520,7 @@ def test_command_without_a_token_is_blocked(
 
     out = run_hook("before", prompt_payload(project, prompt), env)
 
-    assert json.loads(out) == {"decision": "block", "reason": NO_TOKEN_REASON}
+    assert json.loads(out) == blocked(NO_TOKEN_REASON)
     assert " ".join(prompt.split()).lower() not in out.lower()
     assert server.requests == []  # no token, no network
 
@@ -542,7 +543,7 @@ def test_command_without_a_token_or_data_dir_is_blocked(env: dict[str, str], pro
 
     out = json.loads(run_hook("before", prompt_payload(project, "coach, quieter"), env))
 
-    assert out == {"decision": "block", "reason": NO_TOKEN_REASON}
+    assert out == blocked(NO_TOKEN_REASON)
 
 
 @pytest.mark.parametrize("prompt", ORDINARY_PROMPTS)
@@ -647,7 +648,7 @@ def test_an_error_after_the_reply_is_written_writes_nothing_more(
 
     out = run_hook("before", prompt_payload(project, "coach, quieter"), env)
 
-    assert json.loads(out) == {"decision": "block", "reason": "Coach: quieter now."}
+    assert json.loads(out) == blocked("Coach: quieter now.")
 
 
 def test_a_command_is_never_blocked_at_the_end_of_a_turn_by_an_error(
@@ -665,7 +666,7 @@ def test_a_byte_order_mark_on_stdin_is_ignored(
 
     out = run_hook("before", "﻿" + json.dumps(prompt_payload(project, "coach, quieter")), env)
 
-    assert json.loads(out) == {"decision": "block", "reason": "Coach: quieter now."}
+    assert json.loads(out) == blocked("Coach: quieter now.")
 
 
 @pytest.mark.parametrize("prompt", ["coach, quieter", "add a test"])

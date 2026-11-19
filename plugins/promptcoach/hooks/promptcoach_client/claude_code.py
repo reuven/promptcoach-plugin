@@ -147,12 +147,25 @@ def emit(reply: core.Reply | None, stdout: TextIO, *, allow_block: bool) -> None
     ``Stop`` would make Claude keep going, so it is never allowed there.
     The message loses control characters (no terminal escapes) and is
     capped at 4 KB.
+
+    A block also sets ``suppressOriginalPrompt``, so Claude Code's block
+    message doesn't end with "Original prompt:" and the command echoed back.
+    Claude Code versions that predate the key ignore it and still block
+    (checked on 2.1.0, 2.1.142, 2.1.233 and 2.1.328).
     """
     if reply is None or reply.message is None:
         return
     message = core.clean_message(reply.message)
+    out: dict[str, object]
     if reply.block and allow_block:
-        out = {"decision": "block", "reason": message}
+        out = {
+            "decision": "block",
+            "reason": message,
+            "hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "suppressOriginalPrompt": True,
+            },
+        }
     else:
         out = {"systemMessage": message}
     stdout.write(json.dumps(out))

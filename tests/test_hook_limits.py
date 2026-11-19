@@ -22,6 +22,7 @@ from conftest import (
     ORDINARY_PROMPTS,
     TOKEN,
     StubServer,
+    blocked,
     child_env,
     posix_only,
     prompt_payload,
@@ -142,7 +143,7 @@ def test_read_only_data_dir_still_blocks(
     finally:
         data_dir.chmod(0o755)
 
-    assert json.loads(out) == {"decision": "block", "reason": "Coach: quieter now."}
+    assert json.loads(out) == blocked("Coach: quieter now.")
     assert json.loads(after) == {"systemMessage": "Coach: quieter now."}
 
 
@@ -194,7 +195,7 @@ def test_block_is_honored_for_a_coach_command(
 ) -> None:
     server.reply = BLOCK
     out = json.loads(run_hook("before", prompt_payload(project, prompt=prompt), env))
-    assert out == {"decision": "block", "reason": "Coach: quieter now."}
+    assert out == blocked("Coach: quieter now.")
 
 
 @pytest.mark.parametrize("prompt", ORDINARY_PROMPTS)
@@ -232,7 +233,7 @@ def test_messages_lose_control_characters_and_are_capped(
 def test_block_reason_is_cleaned_too() -> None:
     out = io.StringIO()
     claude_code.emit(core.Reply("a\x1b[2Jb", True, False), out, allow_block=True)
-    assert json.loads(out.getvalue()) == {"decision": "block", "reason": "a[2Jb"}
+    assert json.loads(out.getvalue()) == blocked("a[2Jb")
 
 
 # --- mutation survivors: Stop never blocks, stdin is bounded, no redirect -----------------
