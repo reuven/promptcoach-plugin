@@ -19,10 +19,12 @@ past the cleanup. The in-process tests cover the same code on every OS.
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import sys
 import threading
 import time
+from collections.abc import Iterable
 from pathlib import Path
 
 import pytest
@@ -102,8 +104,11 @@ def _waiting_git(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _resume(thread: threading.Thread) -> None:
     """Let a parked thread go (no hook ever does), so the test leaves none
-    behind; conftest does it too, after a test that failed first."""
+    behind; conftest does it too, after a test that failed first. A thread
+    parked on _BUSY_CHANGED needs a notify to see _RESUME."""
     gitdiff._RESUME.set()
+    with gitdiff._BUSY_CHANGED:
+        gitdiff._BUSY_CHANGED.notify_all()
     thread.join(10)
 
 
@@ -200,3 +205,50 @@ def test_a_start_that_ends_after_the_exit_cleanup_kills_its_git_and_parks(
             proc.kill()
     _resume(thread)
     assert returned == [None]
+
+
+@posix_only(
+    "test_exit_park.py::test_exit_cleanup_returns_once_the_git_thread_is_parked",
+    "signal masks are POSIX",
+)
+def test_a_git_thread_blocks_signals_before_its_count_drops_and_parks_in_one_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fix round M6: between the decrement that lets the exit cleanup return
+    and the park, the thread must run no Python with signals open. So it
+    blocks every signal while still counted and holding _BUSY_CHANGED, and
+    parks by waiting on that same condition (which drops the lock and
+    sleeps in one step), never after letting go of it."""
+    gitdiff._EXITING.set()
+    real = signal.pthread_sigmask
+    seen: list[tuple[int, bool]] = []
+
+    def sigmask(how: int, mask: Iterable[int]) -> set[int]:
+        mask = set(mask)
+        if how == signal.SIG_BLOCK and mask == set(signal.valid_signals()):
+            owned = bool(gitdiff._BUSY_CHANGED._is_owned())  # type: ignore[attr-defined]
+            seen.append((gitdiff._BUSY[0], owned))
+        return set(real(how, mask))
+
+    monkeypatch.setattr(signal, "pthread_sigmask", sigmask)
+
+    def work() -> None:
+        with gitdiff._git_thread():
+            pass
+
+    thread = threading.Thread(target=work, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 10
+    while not seen:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    thread.join(0.3)
+    assert thread.is_alive()  # parked
+    # Still counted, and inside the critical section, when signals close.
+    assert seen == [(1, True)]
+    # The park released _BUSY_CHANGED: the exit cleanup can take it at once.
+    assert gitdiff._BUSY_CHANGED.acquire(timeout=1)
+    assert gitdiff._BUSY[0] == 0
+    gitdiff._BUSY_CHANGED.release()
+    _resume(thread)
+    assert not thread.is_alive()

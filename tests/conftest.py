@@ -284,6 +284,8 @@ def _exit_cleanup_undone() -> Iterator[None]:
     yield
     if gitdiff._EXITING.is_set():
         gitdiff._RESUME.set()
+        with gitdiff._BUSY_CHANGED:  # a thread parked on it needs the notify
+            gitdiff._BUSY_CHANGED.notify_all()
         gitdiff._EXITING.clear()
         gitdiff._RESUME.clear()
 
