@@ -535,6 +535,8 @@ def _run_git(
         if threading.get_ident() in _PENDING_TERM:
             _PENDING_TERM.discard(threading.get_ident())
             _on_term(signal.SIGTERM, None)
+    stdout = proc.stdout
+    assert stdout is not None  # noqa: S101 - PIPE always sets it
     if _EXITING.is_set():  # the exit cleanup ran while git started: it can't miss it
         # Kill git and start no reader: a start that outlasted the cleanup's
         # wait resumes here while the interpreter finalizes, and on CPython
@@ -543,13 +545,10 @@ def _run_git(
         _kill(proc)
         with contextlib.suppress(subprocess.TimeoutExpired):
             proc.wait(_READER_GRACE_S)
-        if proc.stdout is not None:  # no reader: nothing can be blocked on it
-            proc.stdout.close()
+        stdout.close()  # no reader: nothing can be blocked on it
         _forget(proc)
         return None
     chunks: list[bytes] = []
-    stdout = proc.stdout
-    assert stdout is not None  # noqa: S101 - PIPE always sets it
 
     # Set when the read is over: the reader may then park rather than end.
     finished = threading.Event()
