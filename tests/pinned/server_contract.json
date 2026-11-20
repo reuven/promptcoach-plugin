@@ -74,6 +74,7 @@
     "pandas",
     "plotly",
     "polars",
+    "python",
     "seaborn",
     "sklearn"
   ],

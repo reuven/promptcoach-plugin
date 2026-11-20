@@ -83,6 +83,7 @@ PROJECT_SIGNALS = frozenset(
         "plotly",
         "matplotlib",
         "seaborn",
+        "python",
     }
 )
 LINTERS = frozenset({"ruff", "mypy", "pyright", "black", "flake8", "pylint"})
