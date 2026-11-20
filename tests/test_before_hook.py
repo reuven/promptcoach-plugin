@@ -223,7 +223,7 @@ def test_collect_setup_detects_tools(project: Path, home: Path) -> None:
         "hook_tools": {
             "PostToolUse": ["pc:lint_after_edit", "ruff", "ruff-check", "ruff-format", "uv"]
         },
-        "project_signals": ["jupyter", "pandas", "sklearn"],
+        "project_signals": ["jupyter", "pandas", "python", "sklearn"],
         "gitignore_covers_data": True,
         "skills": ["release", "review"],
     }
