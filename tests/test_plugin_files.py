@@ -169,7 +169,7 @@ def test_every_version_string_is_one_value() -> None:
     assert pyproject is not None
     versions = {plugin["version"], pyproject.group(1), __version__}
     versions |= {p["version"] for p in market["plugins"] if "version" in p}
-    assert versions == {"1.0.0b7"}
+    assert versions == {"1.0.0b8"}
 
 
 def _ci_jobs() -> dict[str, str]:
