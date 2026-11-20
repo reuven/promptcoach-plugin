@@ -1,7 +1,7 @@
 {
   "name": "promptcoach",
   "displayName": "Prompt coach",
-  "version": "1.0.0b8",
+  "version": "1.0.0b9",
   "description": "Coaching on your prompts and on what the agent did, shown to you, never to Claude",
   "author": {"name": "Reuven Lerner"},
   "homepage": "https://coach.lernerpython.com",
