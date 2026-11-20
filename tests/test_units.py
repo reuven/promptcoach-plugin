@@ -552,6 +552,16 @@ def test_marimo_notebooks_and_walk_limits(
     assert collect_setup(project, home, SOURCES)["project_signals"] == []
 
 
+@pytest.mark.parametrize("marker", ["setup.py", "requirements.txt"])
+def test_python_markers_do_not_need_the_walk(
+    project: Path, home: Path, monkeypatch: pytest.MonkeyPatch, marker: str
+) -> None:
+    """A root marker file says "python" even when the walk is cut to zero files."""
+    monkeypatch.setattr(setup_scan, "MAX_WALK_FILES", 0)
+    _write(project / marker, "")
+    assert collect_setup(project, home, SOURCES)["project_signals"] == ["python"]
+
+
 def test_gitignore_covers_data_needs_everything(project: Path, home: Path) -> None:
     _write(project / ".gitignore", "data/\n*.csv\n")
     assert collect_setup(project, home, SOURCES)["gitignore_covers_data"] is False
