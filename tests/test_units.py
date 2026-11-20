@@ -510,7 +510,35 @@ def test_project_signals(project: Path, home: Path) -> None:
         "matplotlib",
         "plotly",
         "polars",
+        "python",
     ]
+
+
+@pytest.mark.parametrize(
+    ("rel", "text"),
+    [
+        ("pyproject.toml", ""),  # exists but empty still counts
+        ("setup.py", ""),
+        ("setup.cfg", ""),
+        ("requirements.txt", ""),
+        ("requirements-dev.txt", ""),
+        ("a/b/c/deep.py", ""),  # three levels down, same walk
+    ],
+)
+def test_python_signal_alone(project: Path, home: Path, rel: str, text: str) -> None:
+    _write(project / rel, text)
+    assert collect_setup(project, home, SOURCES)["project_signals"] == ["python"]
+
+
+def test_no_python_signal_without_python(project: Path, home: Path) -> None:
+    assert collect_setup(project, home, SOURCES)["project_signals"] == []
+    _write(project / ".venv/x.py", "")  # hidden dir: skipped
+    assert collect_setup(project, home, SOURCES)["project_signals"] == []
+
+
+def test_python_is_not_a_dependency_name(project: Path, home: Path) -> None:
+    _write(project / "requirements.txt", "python\n")
+    assert collect_setup(project, home, SOURCES)["project_signals"] == ["python"]
 
 
 def test_marimo_notebooks_and_walk_limits(
@@ -519,9 +547,19 @@ def test_marimo_notebooks_and_walk_limits(
     _write(project / "notebooks/a.py", "import marimo\napp = marimo.App()\n")
     _write(project / ".venv/lib/x.ipynb", "{}")  # hidden: skipped
     _write(project / "a/b/c/d/deep.ipynb", "{}")  # too deep: skipped
-    assert collect_setup(project, home, SOURCES)["project_signals"] == ["marimo"]
+    assert collect_setup(project, home, SOURCES)["project_signals"] == ["marimo", "python"]
     monkeypatch.setattr(setup_scan, "MAX_WALK_FILES", 0)
     assert collect_setup(project, home, SOURCES)["project_signals"] == []
+
+
+@pytest.mark.parametrize("marker", ["setup.py", "requirements.txt"])
+def test_python_markers_do_not_need_the_walk(
+    project: Path, home: Path, monkeypatch: pytest.MonkeyPatch, marker: str
+) -> None:
+    """A root marker file says "python" even when the walk is cut to zero files."""
+    monkeypatch.setattr(setup_scan, "MAX_WALK_FILES", 0)
+    _write(project / marker, "")
+    assert collect_setup(project, home, SOURCES)["project_signals"] == ["python"]
 
 
 def test_gitignore_covers_data_needs_everything(project: Path, home: Path) -> None:

@@ -45,7 +45,7 @@ _PLAIN_TOOLS = sorted(t for t in KNOWN_HOOK_TOOLS if ":" not in t and t[:5] != "
 _TOOL_WORD = {t: re.compile(rf"(?<![\w.-]){re.escape(t)}(?![\w-])") for t in _PLAIN_TOOLS}
 _RUFF_SUB = re.compile(r"(?<![\w.-])ruff\s+(check|format)(?![\w-])")
 _MARKER = re.compile(r"#(pc:[a-z_]+)")
-_DEPENDENCY_NAMES = {name: name for name in PROJECT_SIGNALS - {"jupyter", "sklearn"}}
+_DEPENDENCY_NAMES = {name: name for name in PROJECT_SIGNALS - {"jupyter", "sklearn", "python"}}
 _DEPENDENCY_NAMES["scikit-learn"] = "sklearn"
 _DEPENDENCY_NAMES["sklearn"] = "sklearn"
 _DEPENDENCY_NAMES["jupyter"] = "jupyter"
@@ -280,11 +280,20 @@ def _project_signals(project_dir: Path, pyproject: str) -> list[str]:
             m = _REQUIREMENT.match(line)
             names += [m.group(1)] if m and not line.lstrip().startswith("#") else []
     found = {_DEPENDENCY_NAMES[n.lower()] for n in names if n.lower() in _DEPENDENCY_NAMES}
+    # Root marker files by existence, not content: an empty pyproject.toml still
+    # says "Python project". The walk below adds any .py file it meets.
+    markers = ("pyproject.toml", "setup.py", "setup.cfg")
+    if any((project_dir / m).is_file() for m in markers) or any(
+        project_dir.glob("requirements*.txt")
+    ):
+        found.add("python")
     for path in _walk(project_dir):
         if path.suffix == ".ipynb":
             found.add("jupyter")
-        elif path.suffix == ".py" and "marimo" not in found and _is_marimo(path, project_dir):
-            found.add("marimo")
+        elif path.suffix == ".py":
+            found.add("python")
+            if "marimo" not in found and _is_marimo(path, project_dir):
+                found.add("marimo")
     return sorted(found & PROJECT_SIGNALS)
 
 

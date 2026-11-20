@@ -42,7 +42,7 @@ def test_before_posts_and_emits_system_message(
     assert req.path == "/v1/before"
     assert req.headers["Authorization"] == f"Bearer {TOKEN}"
     assert req.body["agent"] == "claude-code"
-    assert req.body["plugin_version"] == "1.0.0b8"
+    assert req.body["plugin_version"] == "1.0.0b9"
     assert req.body["session_id"] == "sess-1"
     assert req.body["prompt_id"] == "prompt-1"
     assert req.body["prompt"] == "fix it"
@@ -223,7 +223,7 @@ def test_collect_setup_detects_tools(project: Path, home: Path) -> None:
         "hook_tools": {
             "PostToolUse": ["pc:lint_after_edit", "ruff", "ruff-check", "ruff-format", "uv"]
         },
-        "project_signals": ["jupyter", "pandas", "sklearn"],
+        "project_signals": ["jupyter", "pandas", "python", "sklearn"],
         "gitignore_covers_data": True,
         "skills": ["release", "review"],
     }
